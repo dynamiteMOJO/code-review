@@ -5,16 +5,8 @@ import pandas as pd
 from typing import List, Dict, Any
 import os
 
-# Optional imports for AI
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
-
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+# Import the new chat wrapper
+from iliad_client import IliadChatClient
 
 class ASTAnalyzer(ast.NodeVisitor):
     def __init__(self):
@@ -44,7 +36,6 @@ class ASTAnalyzer(ast.NodeVisitor):
             
         # Check for sys.exit(1) or exit(1) in generic calls
         if isinstance(node.func, ast.Attribute) and node.func.attr == "exit":
-             # This matches things like sys.exit
              self.findings.append({
                 "check": "Proper exit codes used",
                 "status": "Info",
@@ -83,37 +74,23 @@ class ASTAnalyzer(ast.NodeVisitor):
 
 
 class AIReviewer:
-    def __init__(self, provider: str, api_key: str):
-        self.provider = provider
-        self.api_key = api_key
-        self.client = None
+    def __init__(self, provider: str = 'openai', model_name: str = 'gpt-4'):
+        self.chat_client = None
         self.is_configured = False
-
-        if not api_key:
-            return
-
-        if provider == "OpenAI" and OpenAI:
-            try:
-                self.client = OpenAI(api_key=api_key)
-                self.is_configured = True
-            except Exception as e:
-                print(f"Error initializing OpenAI client: {e}")
         
-        elif provider == "Gemini" and genai:
-            try:
-                genai.configure(api_key=api_key)
-                self.client = genai.GenerativeModel('models/gemini-2.5-flash')
-                self.is_configured = True
-            except Exception as e:
-                print(f"Error initializing Gemini client: {e}")
+        try:
+            # Initialize the custom Iliad Chat wrapper
+            self.chat_client = IliadChatClient(model_provider=provider, model_name=model_name)
+            self.is_configured = True
+        except Exception as e:
+            print(f"Error initializing Iliad Chat: {e}")
 
     def review_item(self, code_snippet: str, checklist_item: str) -> Dict[str, Any]:
         if not self.is_configured:
-            return {"status": "Manual Review", "reason": "AI not configured"}
+            return {"status": "Manual Review", "reason": "AI Client Env Config Missing"}
 
-        prompt = f"""
-        You are a Senior Data Engineer Reviewer.
-        Analyze this Python/PySpark code snippet against the following rule:
+        system_prompt = "You are a Senior Data Engineer Reviewer. Analyze the code against the specific rule."
+        user_prompt = f"""
         Rule: "{checklist_item}"
         
         Code:
@@ -127,20 +104,13 @@ class AIReviewer:
         """
         
         try:
-            content = ""
-            if self.provider == "OpenAI":
-                response = self.client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=150
-                )
-                content = response.choices[0].message.content
-            
-            elif self.provider == "Gemini":
-                response = self.client.generate_content(prompt)
-                content = response.text
+            # Use generate() method from SimplifiedIliadChat
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            content = self.chat_client.generate(messages)
 
-            # Heuristic Parsing
             if "Pass" in content:
                 return {"status": "Pass", "reason": content}
             elif "Fail" in content:
@@ -153,10 +123,11 @@ class AIReviewer:
 
 
 class ReviewEngine:
-    def __init__(self, checklist_path: str = "checklist.csv", ai_provider: str = "OpenAI", ai_api_key: str = None):
+    def __init__(self, checklist_path: str = "checklist.csv", ai_provider: str = "openai", ai_model: str = "gpt-4"):
         self.checklist_path = checklist_path
         self.checklist = self._load_checklist()
-        self.ai_reviewer = AIReviewer(ai_provider, ai_api_key)
+        # Pass provider/model to AIReviewer, credentials are handled via ENV
+        self.ai_reviewer = AIReviewer(provider=ai_provider, model_name=ai_model)
 
     def _load_checklist(self) -> pd.DataFrame:
         try:
@@ -180,7 +151,6 @@ class ReviewEngine:
             analyzer.visit(tree)
             results["automated_results"].extend(analyzer.findings)
             
-             # File-wide AST checks
             if not analyzer.has_try_except:
                  results["automated_results"].append({
                     "check": "Try-Catch blocks present",
@@ -205,19 +175,15 @@ class ReviewEngine:
         if filter_category:
             valid_items = self.checklist[self.checklist['Category'] == filter_category]
         
-        # 3. Process remaining items (AI vs Manual)
-        # Identify checks already covered by Static Analysis to avoid duplication
+        # 3. Process remaining items
         covered_concepts = ["print", "toPandas", "exit", "try catch", "password", "secret"]
         
         for _, row in valid_items.iterrows():
             desc = row['Description']
             category = row['Category']
-            
-            # customizable exclusion logic
             is_covered = any(c.lower() in desc.lower() for c in covered_concepts)
             
             if not is_covered:
-                # Send to AI
                 ai_res = self.ai_reviewer.review_item(code_content, desc)
                 if ai_res["status"] in ["Pass", "Fail"]:
                     results["ai_results"].append({
@@ -227,7 +193,6 @@ class ReviewEngine:
                         "category": category
                     })
                 else:
-                    # Fallback to Manual
                     results["manual_checklist"].append({
                          "Category": category,
                          "Description": desc,

@@ -13,10 +13,16 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # AI Provider Selection
-        ai_provider = st.selectbox("Select AI Provider", ["OpenAI", "Gemini"])
+        st.info("Using 'Iliad Chat' Integration")
         
-        api_key = st.text_input(f"{ai_provider} API Key", type="password", help="Required for AI insights")
+        # AI Provider Selection
+        ai_provider = st.selectbox("Select Provider", ["openai", "anthropic"])
+        
+        # Dynamic Model Default
+        default_model = "gpt-4" if ai_provider == "openai" else "claude-3-honku"
+        model_name = st.text_input("AI Model Name", value=default_model)
+        
+        st.warning("Ensure `.env` file contains ILIAD credentials or set environment variables.")
         
         st.divider()
         st.subheader("Review Scope")
@@ -30,8 +36,8 @@ def main():
             except:
                 st.error("checklist.csv not found")
 
-    # Initialize Engine
-    engine = ReviewEngine("checklist.csv", ai_provider=ai_provider, ai_api_key=api_key)
+    # Initialize Engine (No API Key needed from UI)
+    engine = ReviewEngine("checklist.csv", ai_provider=ai_provider, ai_model=model_name)
 
     # Main Input Area
     st.subheader("1. Input Code")
@@ -59,7 +65,7 @@ def run_analysis(engine, code, filter_cat):
     st.divider()
     st.subheader("2. Review Report")
     
-    with st.spinner("Running AST Analysis & AI Agents..."):
+    with st.spinner("Running Iliad AI Analysis..."):
         results = engine.analyze(code, filter_category=filter_cat)
         
     automated_findings = results.get("automated_results", [])
@@ -78,7 +84,7 @@ def run_analysis(engine, code, filter_cat):
     st.divider()
 
     # 2. AI Insights
-    st.markdown("#### 🤖 AI Insights")
+    st.markdown("#### 🤖 AI Insights (Iliad)")
     if ai_findings:
         for finding in ai_findings:
             icon = "✅" if finding['status'] == 'Pass' else "❌"
@@ -86,9 +92,9 @@ def run_analysis(engine, code, filter_cat):
             st.caption(f"Reasoning: {finding['message']}")
     else:
         if not manual_checklist:
-             st.info("AI had no specific comments (or logic covered by manual check).")
+             st.info("AI had no specific comments.")
         else:
-             st.warning("AI Insights unavailable or skipped (Check API Key).")
+             st.warning("AI Insights returned Error or Unsure.")
 
     st.divider()
     
