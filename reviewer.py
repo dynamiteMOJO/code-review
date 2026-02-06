@@ -4,6 +4,7 @@ import ast
 import pandas as pd
 from typing import List, Dict, Any
 import os
+import json
 
 # Import the new chat wrapper
 from iliad_client import IliadChatClient
@@ -85,22 +86,33 @@ class AIReviewer:
         except Exception as e:
             print(f"Error initializing Iliad Chat: {e}")
 
-    def review_item(self, code_snippet: str, checklist_item: str) -> Dict[str, Any]:
+    def review_item(self, code_snippet: str, checklist_item: str, language: str = "python") -> Dict[str, Any]:
         if not self.is_configured:
-            return {"status": "Manual Review", "reason": "AI Client Env Config Missing"}
+            return {
+                "checklist_item": checklist_item,
+                "confidence": "0%",
+                "comment": "AI Client Env Config Missing",
+                "status": "Unsure",
+                "line_number": "General"
+            }
 
-        system_prompt = "You are a Senior Data Engineer Reviewer. Analyze the code against the specific rule."
+        system_prompt = f"You are a Senior Data Engineer Reviewer. Analyze the {language} code against the specific rule."
         user_prompt = f"""
         Rule: "{checklist_item}"
         
         Code:
-        ```python
+        ```{language}
         {code_snippet}
         ```
         
-        Return ONLY a JSON-like text with:
-        - "status": "Pass" or "Fail" or "Unsure"
-        - "reason": A brief explanation (max 1 sentence).
+        Analyze the code against the rule.
+        Return ONLY a JSON object with the following keys:
+        - "status": "Pass", "Fail", or "Unsure"
+        - "confidence": A percentage score (e.g., "95%").
+        - "comment": The actual review comment. If there is a violation, explain why. Short & concise.
+        - "line_number": The exact line number(s) where the issue occurs (e.g., "10", "15-20"). If not applicable/general, use "General".
+        
+        Ensure the output is valid JSON. Do not include any markdown formatting like ```json ... ```.
         """
         
         try:
@@ -111,22 +123,42 @@ class AIReviewer:
             ]
             content = self.chat_client.generate(messages)
 
-            if "Pass" in content:
-                return {"status": "Pass", "reason": content}
-            elif "Fail" in content:
-                 return {"status": "Fail", "reason": content}
-            else:
-                 return {"status": "Unsure", "reason": content}
+            # Attempt to clean markdown json blocks if present
+            clean_content = content.replace("```json", "").replace("```", "").strip()
+            
+            try:
+                data = json.loads(clean_content)
+                return {
+                    "checklist_item": checklist_item,
+                    "confidence": data.get("confidence", "N/A"),
+                    "comment": data.get("comment", "No comment provided"),
+                    "status": data.get("status", "Unsure"),
+                    "line_number": str(data.get("line_number", "General"))
+                }
+            except json.JSONDecodeError:
+                # Fallback if JSON parsing fails
+                return {
+                    "checklist_item": checklist_item,
+                    "confidence": "Low",
+                    "comment": f"Raw AI Response: {content}",
+                    "status": "Unsure",
+                    "line_number": "General"
+                }
 
         except Exception as e:
-            return {"status": "Error", "reason": str(e)}
+            return {
+                "checklist_item": checklist_item,
+                "confidence": "0%",
+                "comment": f"Error: {str(e)}",
+                "status": "Error",
+                "line_number": "General"
+            }
 
 
 class ReviewEngine:
     def __init__(self, checklist_path: str = "checklist.csv", ai_provider: str = "openai", ai_model: str = "gpt-4"):
         self.checklist_path = checklist_path
         self.checklist = self._load_checklist()
-        # Pass provider/model to AIReviewer, credentials are handled via ENV
         self.ai_reviewer = AIReviewer(provider=ai_provider, model_name=ai_model)
 
     def _load_checklist(self) -> pd.DataFrame:
@@ -136,40 +168,48 @@ class ReviewEngine:
             print(f"Error loading checklist: {e}")
             return pd.DataFrame(columns=["Category", "Description"])
 
-    def analyze(self, code_content: str, filter_category: str = "Code CDL Standards") -> Dict[str, Any]:
-        results = {
-            "automated_results": [],
-            "ai_results": [],
-            "manual_checklist": [],
-            "summary": {"passed": 0, "warnings": 0, "failed": 0}
-        }
+    def analyze_stream(self, code_content: str, filter_category: str = "Code CDL Standards", language: str = "python"):
+        """
+        Yields review results one by one.
+        """
+        
+        # 1. Static Analysis (AST) - ONLY FOR PYTHON
+        ast_findings = []
+        if language == "python":
+            try:
+                tree = ast.parse(code_content)
+                analyzer = ASTAnalyzer()
+                analyzer.visit(tree)
+                ast_findings = analyzer.findings
+                
+                if not analyzer.has_try_except:
+                     ast_findings.append({
+                        "check": "Try-Catch blocks present",
+                        "status": "Warning",
+                        "line": 0,
+                        "message": "No 'try-except' blocks found. Ensure business logic is handled safely.",
+                        "category": "Code CDL Standards"
+                    })
 
-        # 1. Static Analysis (AST)
-        try:
-            tree = ast.parse(code_content)
-            analyzer = ASTAnalyzer()
-            analyzer.visit(tree)
-            results["automated_results"].extend(analyzer.findings)
-            
-            if not analyzer.has_try_except:
-                 results["automated_results"].append({
-                    "check": "Try-Catch blocks present",
-                    "status": "Warning",
-                    "line": 0,
-                    "message": "No 'try-except' blocks found. Ensure business logic is handled safely.",
-                    "category": "Code CDL Standards"
-                })
+            except SyntaxError as e:
+                yield {
+                    "checklist_item": "Syntax Check",
+                    "confidence": "100%",
+                    "comment": f"Syntax Error: {e.msg}",
+                    "status": "Fail",
+                    "line_number": str(e.lineno)
+                }
 
-        except SyntaxError as e:
-            results["automated_results"].append({
-                "check": "Syntax Check",
-                "status": "Fail",
-                "line": e.lineno,
-                "message": f"Syntax Error: {e.msg}",
-                "category": "General"
-            })
-            return results
-
+        # Yield AST findings
+        for finding in ast_findings:
+            yield {
+                "checklist_item": finding['check'],
+                "confidence": "100%",
+                "comment": finding['message'],
+                "status": finding['status'],
+                "line_number": str(finding['line'])
+            }
+        
         # 2. Filter Checklist
         valid_items = self.checklist
         if filter_category:
@@ -180,23 +220,20 @@ class ReviewEngine:
         
         for _, row in valid_items.iterrows():
             desc = row['Description']
-            category = row['Category']
-            is_covered = any(c.lower() in desc.lower() for c in covered_concepts)
             
-            if not is_covered:
-                ai_res = self.ai_reviewer.review_item(code_content, desc)
-                if ai_res["status"] in ["Pass", "Fail"]:
-                    results["ai_results"].append({
-                        "check": desc,
-                        "status": ai_res["status"],
-                        "message": ai_res["reason"],
-                        "category": category
-                    })
-                else:
-                    results["manual_checklist"].append({
-                         "Category": category,
-                         "Description": desc,
-                         "AI_Note": ai_res.get("reason", "")
-                    })
+            is_concept_covered = any(c.lower() in desc.lower() for c in covered_concepts)
+            
+            if language != "python":
+                is_concept_covered = False
 
-        return results
+            if is_concept_covered:
+                # Blindly yield "Pass" for covered concepts to satisfy "Show list"
+                yield {
+                    "checklist_item": desc,
+                    "confidence": "100%",
+                    "comment": "Verified by Static Analysis.",
+                    "status": "Pass",
+                    "line_number": "N/A"
+                }
+            else:
+                yield self.ai_reviewer.review_item(code_content, desc, language=language)

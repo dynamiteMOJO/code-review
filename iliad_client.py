@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class IliadChatClient:
-    def __init__(self, model_provider='openai', model_name='gpt-4'):
+    def __init__(self, model_provider='anthropic', model_name='claude-sonnet-4-5-20250929'):
         """
         Initialize the Iliad AI client.
 
@@ -71,7 +71,7 @@ class IliadChatClient:
         token = response.json()["access_token"]
         return f"Bearer {token}"
 
-    @retry(wait=wait_exponential(multiplier=2, min=1, max=60), stop=stop_after_attempt(5))
+    @retry(wait=wait_exponential(multiplier=2, min=1, max=60), stop=stop_after_attempt(1))
     def generate(self, text_input):
         """
         Generate output from text input.

@@ -1,12 +1,10 @@
-
 import streamlit as st
 import pandas as pd
 from reviewer import ReviewEngine
 
-st.set_page_config(page_title="Code Review", layout="centered")
+st.set_page_config(page_title="Code Review", layout="wide")
 
-def main():
-    
+def render_header():
     st.markdown("""
     <style>
         /* Hide default Streamlit header */
@@ -80,6 +78,143 @@ def main():
     <div class="main-spacer"></div>
     """, unsafe_allow_html=True)
 
+def render_report_page(engine):
+    # Back button
+    col1, col2 = st.columns([1, 10])
+    with col1:
+        if st.button("← Back"):
+            st.session_state.page = "input"
+            st.session_state.start_review = False
+            st.rerun()
+    
+    st.divider()
+    st.subheader("2. Review Report")
+    
+    # Placeholders for streaming content
+    status_placeholder = st.empty()
+    results_placeholder = st.empty()
+    
+    if st.session_state.get("start_review", False):
+        st.session_state.start_review = False 
+        
+        st.session_state.review_results = []
+        status_placeholder.info("Running Analysis...")
+        
+        code = st.session_state.get("review_code", "")
+        lang = st.session_state.get("review_language", "python")
+        cat = st.session_state.get("review_category", None)
+        
+        try:
+            for result in engine.analyze_stream(code, filter_category=cat, language=lang):
+                # Format result for display
+                review_comment = result['comment']
+                line_info = f"(Line: {result['line_number']})" if result['line_number'] != "General" else ""
+                full_review = f"{review_comment} {line_info}"
+                
+                # Add icons to status
+                status_map = {
+                    "Pass": "✅ Pass",
+                    "Fail": "❌ Fail",
+                    "Warning": "⚠️ Warning",
+                    "Unsure": "❓ Unsure",
+                    "Info": "ℹ️ Info"
+                }
+                status_with_icon = status_map.get(result["status"], result["status"])
+                
+                check_item = {
+                    "Checklist Item": result["checklist_item"],
+                    "Review": full_review,
+                    "Confidence": result["confidence"],
+                    "Status": status_with_icon
+                }
+                
+                st.session_state.review_results.append(check_item)
+                
+                # Update DataFrame
+                df = pd.DataFrame(st.session_state.review_results)
+                # Force column order
+                df = df[["Checklist Item", "Review", "Confidence", "Status"]]
+                
+                results_placeholder.dataframe(
+                    df, 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+            
+            status_placeholder.success("Review Complete!")
+            
+        except Exception as e:
+            status_placeholder.error(f"Error during review: {str(e)}")
+            
+    else:
+        # Show existing results
+        if st.session_state.get("review_results"):
+            df = pd.DataFrame(st.session_state.review_results)
+            
+            # Ensure order even on reload (if columns exist)
+            cols = ["Checklist Item", "Review", "Confidence", "Status"]
+            if all(col in df.columns for col in cols):
+                 df = df[cols]
+            
+            results_placeholder.dataframe(
+                df, 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            status_placeholder.info("No active review. Go back and submit code.")
+
+
+def render_input_page(engine, focus_cdl):
+    st.subheader("1. Input Code")
+    
+    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File"), horizontal=True)
+    code_content = ""
+    language = "python" # default
+
+    if input_method == "Paste Code":
+        language = st.selectbox("Select Language", ["python", "sql", "hql", "jil"])
+        code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area")
+    else:
+        uploaded_file = st.file_uploader("Upload .py, .sql, .hql, .jil file", type=["py", "txt", "sql", "hql", "jil"])
+        if uploaded_file is not None:
+             try:
+                stringio = uploaded_file.getvalue().decode("utf-8")
+                code_content = stringio
+                
+                # Determine language from extension
+                filename = uploaded_file.name.lower()
+                if filename.endswith(".sql"):
+                    language = "sql"
+                elif filename.endswith(".hql"):
+                    language = "hql" # HiveQL
+                elif filename.endswith(".jil"):
+                    language = "jil"
+                else:
+                    language = "python"
+                    
+             except Exception as e:
+                st.error(f"Error reading file: {e}")
+
+    # Operations
+    if st.button("Run Review", type="primary", disabled=not code_content.strip()):
+        st.session_state.review_code = code_content
+        st.session_state.review_language = language
+        st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
+        st.session_state.start_review = True
+        st.session_state.page = "report"
+        st.rerun()
+
+def main():
+    if "page" not in st.session_state:
+        st.session_state.page = "input"
+    
+    # Ensure session state variables exist
+    if "review_results" not in st.session_state:
+        st.session_state.review_results = []
+
+    render_header()
+    
     st.divider()
 
     # Sidebar Configuration
@@ -108,78 +243,10 @@ def main():
     # Initialize Engine (No API Key needed from UI)
     engine = ReviewEngine("checklist.csv", ai_provider=ai_provider, ai_model=model_name)
 
-    # Main Input Area
-    st.subheader("1. Input Code")
-    
-    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File"), horizontal=True)
-    code_content = ""
-    
-    if input_method == "Paste Code":
-        code_content = st.text_area("Paste your PySpark/Python code here:", height=300)
-    else:
-        uploaded_file = st.file_uploader("Upload .py or .ipynb file", type=["py", "txt"])
-        if uploaded_file is not None:
-             try:
-                stringio = uploaded_file.getvalue().decode("utf-8")
-                code_content = stringio
-             except Exception as e:
-                st.error(f"Error reading file: {e}")
-
-    # Operations
-    if st.button("Run Review", type="primary", disabled=not code_content.strip()):
-        filter_cat = "Code CDL Standards" if focus_cdl else None
-        run_analysis(engine, code_content, filter_cat)
-
-def run_analysis(engine, code, filter_cat):
-    st.divider()
-    st.subheader("2. Review Report")
-    
-    with st.spinner("Running AI Analysis..."):
-        results = engine.analyze(code, filter_category=filter_cat)
-        
-    automated_findings = results.get("automated_results", [])
-    ai_findings = results.get("ai_results", [])
-    manual_checklist = results.get("manual_checklist", [])
-    
-    # 1. Static Analysis (AST)
-    st.markdown("#### Static Analysis (AST)")
-    if automated_findings:
-        for finding in automated_findings:
-            color = "red" if finding['status'] == 'Fail' else "orange" if finding['status'] == 'Warning' else "blue"
-            st.markdown(f"**Line {finding['line']}**: :{color}[{finding['status']}] - {finding['message']}")
-    else:
-        st.success("No static issues found.")
-
-    st.divider()
-
-    # 2. AI Insights
-    st.markdown("#### AI Insights")
-    if ai_findings:
-        for finding in ai_findings:
-            icon = "✅" if finding['status'] == 'Pass' else "❌"
-            st.markdown(f"**{icon} {finding['status']}**: {finding['check']}")
-            st.caption(f"Reasoning: {finding['message']}")
-    else:
-        if not manual_checklist:
-             st.info("AI had no specific comments.")
-        else:
-             st.warning("AI Insights returned Error or Unsure.")
-
-    st.divider()
-    
-    # 3. Manual Review
-    st.subheader("3. Manual Verification Needed")
-    st.caption("Items where AI was unsure or static analysis check doesn't exist.")
-    
-    if manual_checklist:
-        for item in manual_checklist:
-            with st.expander(f"{item['Description']}", expanded=True):
-                st.write(f"**Category:** {item['Category']}")
-                if item.get("AI_Note"):
-                    st.info(f"AI Note: {item['AI_Note']}")
-                st.checkbox("Mark as Verified", key=f"manual_{item['Description'][:20]}")
-    else:
-        st.success("All checklist items covered by Automated/AI checks!")
+    if st.session_state.page == "input":
+        render_input_page(engine, focus_cdl)
+    elif st.session_state.page == "report":
+        render_report_page(engine)
 
 if __name__ == "__main__":
     main()
