@@ -1,0 +1,56 @@
+Category,Description
+ABC,Are the ABC configuration using ABC UI and queries deployed in Repo?
+ABC,ABC Integration - any ABC config entry create manually?
+Code CDL Standards,"Is this project using common Framework? In case of custom code, can any existing framework code can be used?"
+Code CDL Standards,Any parameters having hardcoded values?
+Code CDL Standards,Are the checks and validation available in the code?
+Code CDL Standards,Is the program designed to fail gracefully? Proof attached?
+Code CDL Standards,Python code: The try catch block should be present while handle business logic
+Code CDL Standards,The exit(1) should be incorporate in the exception block
+Code CDL Standards,"When using Array data type, array bounds are checked? This is to prevent IndexError or ArrayIndexOutOfBounds exception."
+Code CDL Standards,Python packages - approved from Abbvie Architecture?
+Code CDL Standards,View objects are compatible with Trino?
+Code CDL Standards,All tablenames/DB/columns are properly parametrized?
+Code CDL Standards,All configurations should be YAML with proper comments in the file?
+Code CDL Standards,All set of code/configurations folders are available in respective technology dev/qa/prod folders?
+Code CDL Standards,"Is the configuration folder having code and core business logics? If yes, ask them to move to respective code folders."
+Code CDL Standards,No CWS tables are used in the code?
+Code CDL Standards,Any data getting duplicated in any of the CDL layers? Suggest to prevent data redundancy.
+Code CDL Standards,All temp data/tables getting cleanedup before exiting the process?
+Code CDL Standards,"Is the code writing the data in work layer tables? If yes, ask for business reason."
+Code CDL Standards,"Is the code has logger functionality, avoiding print statements, commenting the code."
+Code CDL Standards,count validation - is the process having the count check post the data load?
+Code CDL Standards,Any redundant code that can be replaced by existing functions?
+Code CDL Standards,"For new onboardings, env config file names should be as per the standard and not duplicated, all env configs names should be unique."
+Code CDL Standards,No. of the part files in all the tables should be optimized and not having many small part files. Ideal 128MB or 256MB.
+Code CDL Standards,Are the consumption tables/scripts are using delta format?
+Data Import,"In case of source being file, is there a copy job involved, how the dependency will be setup? (ABC - possible exit code 0,1,2)"
+Data Import,ABC Metadata - Is it in sync in DEV/QA/PROD?
+File Onboarding,Is the unit testing completed and approved?
+File Onboarding,"Data Import - Oracle: Sqoop should not be used, the import should use pyspark framework."
+File Onboarding,"Data Import - Oracle: the import query using select * or select column1, column2, ... If select *, how schema is managed between Oracle and CDL?"
+File Onboarding,Data Import - Snowflake: Is it using any of the existing Standard framework?
+File Onboarding,"Data Import - Snowflake: the import query using select * or select column1, column2, ... If select *, how schema is managed between Oracle and CDL?"
+File Onboarding,"CI CD build pipeline yamls for the scripts (python, scala) folder enabled with sonarqube tasks and snyk?"
+File Onboarding,"File onboarding - file frequency, data volume, file format, file arrival path, ppds/moveit dependency, possibility of getting data file with header only, etc."
+File Onboarding,File onboarding - source sharing control file?
+File Onboarding,"File onboarding - if multiple data files, will source share trigger file at the end of transmission which can be used to trigger file consumption job?"
+File Onboarding,File onboarding - where source is placing the data files? Ppds/moveit involved?
+Infra,"File onboarding - data file have header? Any possibility of getting header alone in the data file? If so, skipEmptyDataFile=Y is being used to prevent empty list file?"
+Logging and Auditing,PR having proper description and CAB ID?
+Logging and Auditing,"In which cluster (transient/persistent) the process will run? If transient, cluster creation and termination process are available?"
+Optimization Checks,Is all PI and sensitive information being sent over the network encrypted/Pseudonomized form?
+Optimization Checks,Is Trino analyzer job added to collect stats for consumption tables?
+Optimization Checks,All spark parameters and memories are optimized based on the input file size?
+Optimization Checks,Is Spark submit command is configured with yarn-cluster mode?
+Optimization Checks,"Ask for the justification of using huge memory in the spark configuration? If required, seek the approval email from business stakeholders."
+Optimization Checks,"All final consumption table should be parquet? If not, ask for the reasons and approvals."
+Optimization Checks,Is the code using toPandas api on a huge dataset? This will impact performance and prone to fail when data grows. Suggest not to use toPandas.
+Optimization Checks,Is the code writing the final data to the table with optimized partitions?
+Optimization Checks,Is allocated memory (non-garbage collected) freed? Spark session closed?
+Optimization Checks,Is the data skew addressed? Logic to prevent?
+Optimization Checks,JOIN in pyspark - optimized using broadcast joins where they are suitable?
+Optimization Checks,If the codebase is using any hard coded IP address for any connection? pls ask to use DNS
+Post Load Checks,Any process will run beyond 3 hours in PROD? If so please share approved from the Abbvie IT owner?
+Post Load Checks,Any success/failure notification sent via code? If so CDLOps email DG included?
+Security Checks,Any usage of plain text password? If so replace with aws secret. Is snyk passed?
