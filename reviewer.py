@@ -22,7 +22,10 @@ class ASTAnalyzer(ast.NodeVisitor):
                 "status": "Warning",
                 "line": node.lineno,
                 "message": f"Found print statement on line {node.lineno}. Use a logger instead.",
-                "category": "Code CDL Standards"
+                "category": "Code CDL Standards",
+                "col_offset": node.col_offset,
+                "end_col_offset": node.end_col_offset if hasattr(node, 'end_col_offset') else None,
+                "substring": "print"
             })
         
         # Check for .toPandas()
@@ -32,7 +35,10 @@ class ASTAnalyzer(ast.NodeVisitor):
                 "status": "Warning",
                 "line": node.lineno,
                 "message": f"Found .toPandas() on line {node.lineno}. This can cause OOM errors on large datasets.",
-                "category": "Optimization Checks"
+                "category": "Optimization Checks",
+                "col_offset": node.col_offset,
+                "end_col_offset": node.end_col_offset if hasattr(node, 'end_col_offset') else None,
+                "substring": ".toPandas"
             })
             
         # Check for sys.exit(1) or exit(1) in generic calls
@@ -42,7 +48,8 @@ class ASTAnalyzer(ast.NodeVisitor):
                 "status": "Info",
                 "line": node.lineno,
                 "message": f"Found exit call on line {node.lineno}. Verification needed context.",
-                 "category": "Code CDL Standards"
+                 "category": "Code CDL Standards",
+                 "substring": "exit"
             })
         elif isinstance(node.func, ast.Name) and node.func.id == "exit":
              self.findings.append({
@@ -69,7 +76,10 @@ class ASTAnalyzer(ast.NodeVisitor):
                         "status": "Fail",
                         "line": node.lineno,
                         "message": f"Potential hardcoded secret variable '{target.id}' on line {node.lineno}.",
-                        "category": "Security Checks"
+                        "category": "Security Checks",
+                        "col_offset": node.col_offset,
+                        "end_col_offset": node.end_col_offset if hasattr(node, 'end_col_offset') else None,
+                        "substring": target.id
                     })
         self.generic_visit(node)
 
@@ -111,6 +121,7 @@ class AIReviewer:
         - "confidence": A percentage score (e.g., "95%").
         - "comment": The actual review comment. If there is a violation, explain why. Short & concise.
         - "line_number": The exact line number(s) where the issue occurs (e.g., "10", "15-20"). If not applicable/general, use "General".
+        - "substring": The exact substring from the code line that causes the issue. It MUST match the code character-for-character so it can be highlighted. If unsure or multi-line, use the most relevant keyword or token.
         
         Ensure the output is valid JSON. Do not include any markdown formatting like ```json ... ```.
         """
@@ -133,7 +144,9 @@ class AIReviewer:
                     "confidence": data.get("confidence", "N/A"),
                     "comment": data.get("comment", "No comment provided"),
                     "status": data.get("status", "Unsure"),
-                    "line_number": str(data.get("line_number", "General"))
+                    "status": data.get("status", "Unsure"),
+                    "line_number": str(data.get("line_number", "General")),
+                    "substring": data.get("substring", "")
                 }
             except json.JSONDecodeError:
                 # Fallback if JSON parsing fails
@@ -188,7 +201,8 @@ class ReviewEngine:
                         "status": "Warning",
                         "line": 0,
                         "message": "No 'try-except' blocks found. Ensure business logic is handled safely.",
-                        "category": "Code CDL Standards"
+                        "category": "Code CDL Standards",
+                        "substring": "" # General finding
                     })
 
             except SyntaxError as e:
@@ -207,7 +221,9 @@ class ReviewEngine:
                 "confidence": "100%",
                 "comment": finding['message'],
                 "status": finding['status'],
-                "line_number": str(finding['line'])
+                "status": finding['status'],
+                "line_number": str(finding['line']),
+                "substring": finding.get('substring', "")
             }
         
         # 2. Filter Checklist

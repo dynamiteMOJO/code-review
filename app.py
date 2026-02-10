@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 from reviewer import ReviewEngine
 import html
+from pygments import highlight
+from pygments.lexers import get_lexer_by_name, guess_lexer
+from pygments.formatters import HtmlFormatter
+import re
 
 st.set_page_config(page_title="Code Review", layout="wide")
 
@@ -79,30 +83,35 @@ def render_header():
     <div class="main-spacer"></div>
     """, unsafe_allow_html=True)
 
-def generate_highlighted_code(code, findings):
-    lines = code.split('\n')
-    # Use different colors for different statuses
-    colors = {
-        "Pass": "#e6fffa",    # Light teal
-        "Fail": "#fff5f5",    # Light red
-        "Warning": "#fffaf0", # Light orange
-        "Unsure": "#f0f4ff",  # Light blue
-        "Info": "#f7fafc"     # Light gray
+def generate_highlighted_code(code, findings, language='python'):
+    # precise colors for the border/gutter - more prominent
+    status_colors = {
+        "Pass": "transparent",
+        "Fail": "#e53e3e",    # Red
+        "Warning": "#dd6b20", # Orange
+        "Unsure": "#3182ce",  # Blue
+        "Info": "#718096"     # Gray
     }
     
-    # Map line numbers to finding details
+    # subtle background tints - kept for line background if needed, but we will use them for substring highlighting now
+    bg_colors = {
+        "Pass": "transparent",
+        "Fail": "rgba(249, 38, 114, 0.4)",    # More opaque for text highlight
+        "Warning": "rgba(253, 151, 31, 0.4)", 
+        "Unsure": "rgba(102, 217, 239, 0.4)", 
+        "Info": "rgba(166, 226, 46, 0.4)"   
+    }
+    
+    # Map line numbers
     findings_map = {}
     for finding in findings:
         line_num = str(finding.get('line_number', ''))
         if not line_num or line_num.lower() == "general":
             continue
-            
         try:
-            # Handle ranges like "10-15" or single lines "10"
             parts = line_num.split('-')
             start = int(parts[0])
             end = int(parts[1]) if len(parts) > 1 else start
-            
             for i in range(start, end + 1):
                 if i not in findings_map:
                     findings_map[i] = []
@@ -110,59 +119,158 @@ def generate_highlighted_code(code, findings):
         except (ValueError, IndexError):
             continue
 
-    html_content = [
-        '<div style="font-family: monospace; font-size: 14px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">'
-    ]
+    # Get Pygments Lexer
+    try:
+        lexer = get_lexer_by_name(language, stripall=False)
+    except:
+        lexer = guess_lexer(code)
+        
+    formatter = HtmlFormatter(style='monokai', nowrap=True, noclasses=True)
     
-    for i, line in enumerate(lines, 1):
-        line_content = html.escape(line)
-        bg_color = "transparent"
-        tooltip = ""
-        border_left = "2px solid transparent" # indicator line
+    # We need to highlight line by line to inject our custom wrappers
+    # But highlighting line by line breaks multi-line tokens (like docstrings).
+    # So we highlight the whole block, then split.
+    highlighted_code = highlight(code, lexer, formatter)
+    
+    # Split by newline (handling different newline types if needed, but usually \n)
+    # create a list of spans
+    code_lines = highlighted_code.splitlines()
+
+    # Re-assemble with line numbers and status indicators
+    html_rows = []
+    
+    # Container Style
+    html_rows.append('''
+<style>
+    .code-container {
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        font-size: 14px;
+        background-color: #272822; /* Monokai background */
+        color: #f8f8f2;           /* Monokai foreground */
+        border: 1px solid #48483e;
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    .code-row {
+        display: flex;
+        width: 100%;
+        line-height: 1.5;
+    }
+    .line-num {
+        min-width: 50px;
+        text-align: right;
+        padding-right: 15px;
+        padding-left: 10px;
+        color: #75715e; /* Monokai comment color */
+        background-color: #272822;
+        border-right: 1px solid #48483e;
+        user-select: none;
+    }
+    .code-content {
+        flex-grow: 1;
+        padding-left: 15px;
+        white-space: pre;
+        overflow-x: auto;
+    }
+    /* Specific statuses - Adjusted for Dark Mode */
+    /* Only border, no full background for line */
+    .status-Fail { border-left: 4px solid #f92672; }
+    .status-Warning { border-left: 4px solid #fd971f; }
+    .status-Unsure { border-left: 4px solid #66d9ef; }
+    .status-Info { border-left: 4px solid #a6e22e; }
+    .status-Pass { border-left: 4px solid transparent; }
+    
+    .highlight-marker {
+        border-radius: 3px;
+        padding: 0 2px;
+        font-weight: bold;
+        text-shadow: 0 0 5px rgba(0,0,0,0.5);
+    }
+    
+    .tooltip {
+        position: relative;
+        cursor: help;
+    }
+</style>
+<div class="code-container">
+''')
+    
+    # Ensure code_lines length matches line count (handling trailing newline edge case if splitlines drops it)
+    total_lines = len(code.splitlines())
+    if len(code_lines) < total_lines:
+        code_lines.append("") # Pad if needed
+
+    for i, line_html in enumerate(code_lines, 1):
+        status_class = "status-Pass"
+        tooltip_attr = ""
         
         if i in findings_map:
             line_findings = findings_map[i]
-            # Determine worst status for coloring
             statuses = [f['status'] for f in line_findings]
             
+            # Priority: Fail > Warning > Unsure > Info
             if "Fail" in statuses:
-                status = "Fail"
-                border_color = "#f56565" # Red
+                status_class = "status-Fail"
             elif "Warning" in statuses:
-                status = "Warning"
-                border_color = "#ed8936" # Orange
+                status_class = "status-Warning"
             elif "Unsure" in statuses:
-                status = "Unsure"
-                border_color = "#4299e1" # Blue
+                status_class = "status-Unsure"
             elif "Info" in statuses:
-                status = "Info"
-                border_color = "#a0aec0" # Gray
-            else:
-                status = "Pass"
-                border_color = "#38b2ac" # Teal
-                
-            bg_color = colors.get(status, "transparent")
-            border_left = f"2px solid {border_color}"
+                status_class = "status-Info"
             
-            # Build tooltip content
+            # Tooltip
             tips = []
             for f in line_findings:
-                tips.append(f"[{f['status']}] {f['checklist_item']}: {f['comment']}")
-            tooltip = "&#10;".join([html.escape(t) for t in tips])
+                tips.append(f"[{f['status']}] {f['checklist_item']}:\n{f['comment']}")
+                
+                # Try precise highlighting if substring is available
+                sub = f.get('substring')
+                if sub and len(sub) > 1: # Avoid single chars to reduce noise
+                    try:
+                        # Improved highlighting using regex to handle HTML tags
+                        # 1. Escape the substring for HTML (as it appears in the Pygments output)
+                        escaped_sub_html = html.escape(sub)
+                        
+                        # 2. Build a regex that matches the characters of the substring, 
+                        # allowing for any HTML tags (<div>, <span>, etc.) in between characters.
+                        # This handles cases where Pygments splits tokens (e.g. "sys.exit" -> "sys" "." "exit")
+                        
+                        # Escape each character for regex, then join with pattern for optional tags
+                        # (?:<[^>]*>)* matches 0 or more HTML tags
+                        pattern_str = "(?:<[^>]*>)*".join([re.escape(c) for c in escaped_sub_html])
+                        
+                        # Compile regex ensuring case-sensitive match (usually code is sensitive)
+                        pattern = re.compile(f"({pattern_str})")
+                        
+                        # 3. Create replacement logic
+                        # We wrap the *entire match* (which includes the tags) in our marker span
+                        hl_style = f"background-color: {bg_colors.get(f['status'], 'transparent')};"
+                        
+                        def replacer(match):
+                            return f'<span class="highlight-marker" style="{hl_style}">{match.group(1)}</span>'
+                        
+                        # 4. Perform replacement
+                        # We only replace if valid pattern
+                        line_html = pattern.sub(replacer, line_html)
+                        
+                    except Exception as e:
+                        # Fallback or ignore if regex fails
+                        print(f"Highlight error: {e}")
 
-        row_style = f"background-color: {bg_color}; display: flex; border-left: {border_left};"
-        if tooltip:
-            row_style += " cursor: help;"
+            tooltip_text = "\n\n".join(tips)
+            tooltip_attr = f'title="{html.escape(tooltip_text)}"'
             
-        html_content.append(
-            f'<div style="{row_style}" title="{tooltip}">'
-            f'<span style="color: #a0aec0; padding: 0 10px; user-select: none; min-width: 40px; text-align: right; background: #f7fafc; border-right: 1px solid #edf2f7;">{i}</span>'
-            f'<pre style="margin: 0; padding: 0 10px; overflow-x: auto; white-space: pre-wrap;">{line_content}</pre>'
-            f'</div>'
-        )
+        row_html = f'''
+<div class="code-row {status_class}" {tooltip_attr}>
+    <div class="line-num">{i}</div>
+    <div class="code-content">{line_html}</div>
+</div>
+'''
+        html_rows.append(row_html)
 
-    html_content.append('</div>')
-    return "".join(html_content)
+    html_rows.append('</div>')
+    
+    return "".join(html_rows)
 
 def render_report_page(engine):
     # Back button
@@ -239,7 +347,7 @@ def render_report_page(engine):
             
             status_placeholder.success("Review Complete!")
             with tab2:
-                code_view.markdown(generate_highlighted_code(code, st.session_state.review_findings), unsafe_allow_html=True)
+                code_view.markdown(generate_highlighted_code(code, st.session_state.review_findings, language=lang), unsafe_allow_html=True)
             
         except Exception as e:
             status_placeholder.error(f"Error during review: {str(e)}")
@@ -264,7 +372,8 @@ def render_report_page(engine):
             
             with tab2:
                 if "review_findings" in st.session_state and "review_code" in st.session_state:
-                     code_view.markdown(generate_highlighted_code(st.session_state.review_code, st.session_state.review_findings), unsafe_allow_html=True)
+                     lang_saved = st.session_state.get("review_language", "python")
+                     code_view.markdown(generate_highlighted_code(st.session_state.review_code, st.session_state.review_findings, language=lang_saved), unsafe_allow_html=True)
                 else:
                     code_view.info("Code view not available.")
         else:
