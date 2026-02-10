@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from reviewer import ReviewEngine
+import html
 
 st.set_page_config(page_title="Code Review", layout="wide")
 
@@ -78,6 +79,91 @@ def render_header():
     <div class="main-spacer"></div>
     """, unsafe_allow_html=True)
 
+def generate_highlighted_code(code, findings):
+    lines = code.split('\n')
+    # Use different colors for different statuses
+    colors = {
+        "Pass": "#e6fffa",    # Light teal
+        "Fail": "#fff5f5",    # Light red
+        "Warning": "#fffaf0", # Light orange
+        "Unsure": "#f0f4ff",  # Light blue
+        "Info": "#f7fafc"     # Light gray
+    }
+    
+    # Map line numbers to finding details
+    findings_map = {}
+    for finding in findings:
+        line_num = str(finding.get('line_number', ''))
+        if not line_num or line_num.lower() == "general":
+            continue
+            
+        try:
+            # Handle ranges like "10-15" or single lines "10"
+            parts = line_num.split('-')
+            start = int(parts[0])
+            end = int(parts[1]) if len(parts) > 1 else start
+            
+            for i in range(start, end + 1):
+                if i not in findings_map:
+                    findings_map[i] = []
+                findings_map[i].append(finding)
+        except (ValueError, IndexError):
+            continue
+
+    html_content = [
+        '<div style="font-family: monospace; font-size: 14px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">'
+    ]
+    
+    for i, line in enumerate(lines, 1):
+        line_content = html.escape(line)
+        bg_color = "transparent"
+        tooltip = ""
+        border_left = "2px solid transparent" # indicator line
+        
+        if i in findings_map:
+            line_findings = findings_map[i]
+            # Determine worst status for coloring
+            statuses = [f['status'] for f in line_findings]
+            
+            if "Fail" in statuses:
+                status = "Fail"
+                border_color = "#f56565" # Red
+            elif "Warning" in statuses:
+                status = "Warning"
+                border_color = "#ed8936" # Orange
+            elif "Unsure" in statuses:
+                status = "Unsure"
+                border_color = "#4299e1" # Blue
+            elif "Info" in statuses:
+                status = "Info"
+                border_color = "#a0aec0" # Gray
+            else:
+                status = "Pass"
+                border_color = "#38b2ac" # Teal
+                
+            bg_color = colors.get(status, "transparent")
+            border_left = f"2px solid {border_color}"
+            
+            # Build tooltip content
+            tips = []
+            for f in line_findings:
+                tips.append(f"[{f['status']}] {f['checklist_item']}: {f['comment']}")
+            tooltip = "&#10;".join([html.escape(t) for t in tips])
+
+        row_style = f"background-color: {bg_color}; display: flex; border-left: {border_left};"
+        if tooltip:
+            row_style += " cursor: help;"
+            
+        html_content.append(
+            f'<div style="{row_style}" title="{tooltip}">'
+            f'<span style="color: #a0aec0; padding: 0 10px; user-select: none; min-width: 40px; text-align: right; background: #f7fafc; border-right: 1px solid #edf2f7;">{i}</span>'
+            f'<pre style="margin: 0; padding: 0 10px; overflow-x: auto; white-space: pre-wrap;">{line_content}</pre>'
+            f'</div>'
+        )
+
+    html_content.append('</div>')
+    return "".join(html_content)
+
 def render_report_page(engine):
     # Back button
     col1, col2 = st.columns([1, 10])
@@ -92,12 +178,21 @@ def render_report_page(engine):
     
     # Placeholders for streaming content
     status_placeholder = st.empty()
-    results_placeholder = st.empty()
+    
+    tab1, tab2 = st.tabs(["Table View", "Code View"])
+    
+    with tab1:
+        results_placeholder = st.empty()
+        
+    with tab2:
+        code_view = st.empty()
+        code_view.info("Awaiting review completion...")
     
     if st.session_state.get("start_review", False):
         st.session_state.start_review = False 
         
         st.session_state.review_results = []
+        st.session_state.review_findings = []
         status_placeholder.info("Running Analysis...")
         
         code = st.session_state.get("review_code", "")
@@ -106,6 +201,7 @@ def render_report_page(engine):
         
         try:
             for result in engine.analyze_stream(code, filter_category=cat, language=lang):
+                st.session_state.review_findings.append(result)
                 # Format result for display
                 review_comment = result['comment']
                 line_info = f"(Line: {result['line_number']})" if result['line_number'] != "General" else ""
@@ -142,6 +238,8 @@ def render_report_page(engine):
                 )
             
             status_placeholder.success("Review Complete!")
+            with tab2:
+                code_view.markdown(generate_highlighted_code(code, st.session_state.review_findings), unsafe_allow_html=True)
             
         except Exception as e:
             status_placeholder.error(f"Error during review: {str(e)}")
@@ -149,18 +247,26 @@ def render_report_page(engine):
     else:
         # Show existing results
         if st.session_state.get("review_results"):
-            df = pd.DataFrame(st.session_state.review_results)
             
-            # Ensure order even on reload (if columns exist)
-            cols = ["Checklist Item", "Review", "Confidence", "Status"]
-            if all(col in df.columns for col in cols):
-                 df = df[cols]
+            with tab1:
+                df = pd.DataFrame(st.session_state.review_results)
+                
+                # Ensure order even on reload (if columns exist)
+                cols = ["Checklist Item", "Review", "Confidence", "Status"]
+                if all(col in df.columns for col in cols):
+                        df = df[cols]
+                
+                results_placeholder.dataframe(
+                    df, 
+                    use_container_width=True, 
+                    hide_index=True
+                )
             
-            results_placeholder.dataframe(
-                df, 
-                use_container_width=True, 
-                hide_index=True
-            )
+            with tab2:
+                if "review_findings" in st.session_state and "review_code" in st.session_state:
+                     code_view.markdown(generate_highlighted_code(st.session_state.review_code, st.session_state.review_findings), unsafe_allow_html=True)
+                else:
+                    code_view.info("Code view not available.")
         else:
             status_placeholder.info("No active review. Go back and submit code.")
 
@@ -212,6 +318,8 @@ def main():
     # Ensure session state variables exist
     if "review_results" not in st.session_state:
         st.session_state.review_results = []
+    if "review_findings" not in st.session_state:
+        st.session_state.review_findings = []
 
     render_header()
     
