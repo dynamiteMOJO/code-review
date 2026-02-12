@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 from reviewer import ReviewEngine
+from github_client import GitHubClient
 import html
+import os
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters import HtmlFormatter
@@ -383,14 +385,14 @@ def render_report_page(engine):
 def render_input_page(engine, focus_cdl):
     st.subheader("1. Input Code")
     
-    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File"), horizontal=True)
+    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File", "GitHub PR"), horizontal=True)
     code_content = ""
     language = "python" # default
 
     if input_method == "Paste Code":
         language = st.selectbox("Select Language", ["python", "sql", "hql", "jil"])
         code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area")
-    else:
+    elif input_method == "Upload File":
         uploaded_file = st.file_uploader("Upload .py, .sql, .hql, .jil file", type=["py", "txt", "sql", "hql", "jil"])
         if uploaded_file is not None:
              try:
@@ -410,15 +412,228 @@ def render_input_page(engine, focus_cdl):
                     
              except Exception as e:
                 st.error(f"Error reading file: {e}")
+    elif input_method == "GitHub PR":
+        render_github_pr_flow(focus_cdl)
+        return  # GitHub flow handles its own "Run Review" button
 
-    # Operations
-    if st.button("Run Review", type="primary", disabled=not code_content.strip()):
-        st.session_state.review_code = code_content
-        st.session_state.review_language = language
-        st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
-        st.session_state.start_review = True
-        st.session_state.page = "report"
-        st.rerun()
+    # Operations (for Paste Code / Upload File)
+    if code_content.strip():
+        if st.button("Run Review", type="primary"):
+            st.session_state.review_code = code_content
+            st.session_state.review_language = language
+            st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
+            st.session_state.start_review = True
+            st.session_state.page = "report"
+            st.rerun()
+
+
+def render_github_pr_flow(focus_cdl):
+    """Multi-step GitHub PR selection and review flow."""
+    
+    st.markdown("---")
+    st.markdown("#### 🔗 Connect to GitHub")
+    
+    # --- Step 1: Connection ---
+    col1, col2 = st.columns(2)
+    with col1:
+        gh_username = st.text_input(
+            "GitHub Username",
+            value=os.getenv("GITHUB_USERNAME", ""),
+            key="gh_username_input"
+        )
+    with col2:
+        gh_pat = st.text_input(
+            "Personal Access Token (PAT)",
+            value=os.getenv("GITHUB_PAT", ""),
+            type="password",
+            key="gh_pat_input"
+        )
+    
+    if not gh_username or not gh_pat:
+        st.info("Enter your GitHub username and PAT to connect.")
+        return
+    
+    connect_btn = st.button("🔌 Connect", key="gh_connect_btn")
+    
+    if connect_btn:
+        try:
+            client = GitHubClient(token=gh_pat, username=gh_username)
+            user_info = client.validate_connection()
+            st.session_state.gh_client = client
+            st.session_state.gh_owner = gh_username
+            st.session_state.gh_connected = True
+            st.session_state.gh_user_info = user_info
+            # Clear downstream selections on reconnect
+            for key in ["gh_repos", "gh_prs", "gh_pr_files", "gh_selected_repo", "gh_selected_pr"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Connection failed: {e}")
+            st.session_state.gh_connected = False
+            return
+    
+    if not st.session_state.get("gh_connected", False):
+        return
+    
+    # Show connected status
+    user_info = st.session_state.get("gh_user_info", {})
+    st.success(f"✅ Connected as **{user_info.get('name', gh_username)}** (@{user_info.get('login', gh_username)})")
+    
+    client: GitHubClient = st.session_state.gh_client
+    owner = st.session_state.gh_owner
+    
+    # --- Step 2: Select Repository ---
+    st.markdown("---")
+    st.markdown("#### 📁 Select Repository")
+    
+    # Fetch repos if not cached
+    if "gh_repos" not in st.session_state:
+        try:
+            st.session_state.gh_repos = client.list_repos(owner)
+        except Exception as e:
+            st.error(f"Failed to fetch repos: {e}")
+            return
+    
+    repos = st.session_state.gh_repos
+    if not repos:
+        st.warning("No repositories found for this user.")
+        return
+    
+    repo_names = [r["name"] for r in repos]
+    selected_repo = st.selectbox(
+        "Repository",
+        options=repo_names,
+        key="gh_repo_select",
+        format_func=lambda name: f"{name} ({next((r['language'] for r in repos if r['name'] == name), 'Unknown')})"
+    )
+    
+    if not selected_repo:
+        return
+    
+    # Clear PR cache if repo changed
+    if st.session_state.get("gh_selected_repo") != selected_repo:
+        st.session_state.gh_selected_repo = selected_repo
+        for key in ["gh_prs", "gh_pr_files", "gh_selected_pr"]:
+            st.session_state.pop(key, None)
+    
+    # --- Step 3: Browse Pull Requests ---
+    st.markdown("---")
+    st.markdown("#### 🔀 Open Pull Requests")
+    
+    # Fetch PRs if not cached
+    if "gh_prs" not in st.session_state:
+        try:
+            with st.spinner("Fetching pull requests..."):
+                st.session_state.gh_prs = client.list_pull_requests(owner, selected_repo)
+        except Exception as e:
+            st.error(f"Failed to fetch PRs: {e}")
+            return
+    
+    prs = st.session_state.gh_prs
+    if not prs:
+        st.info("No open pull requests found in this repository.")
+        return
+    
+    # Show PRs in a styled table
+    pr_display = pd.DataFrame([
+        {
+            "#": pr["number"],
+            "Title": pr["title"],
+            "Author": pr["author"],
+            "Date": pr["created_at"],
+            "Branch": f"{pr['head_branch']} → {pr['base_branch']}",
+        }
+        for pr in prs
+    ])
+    st.dataframe(pr_display, use_container_width=True, hide_index=True)
+    
+    # PR selection
+    pr_options = {f"PR #{pr['number']}: {pr['title']}": pr["number"] for pr in prs}
+    selected_pr_label = st.selectbox("Select a PR to review", options=list(pr_options.keys()), key="gh_pr_select")
+    selected_pr_num = pr_options[selected_pr_label]
+    
+    # Clear files cache if PR changed
+    if st.session_state.get("gh_selected_pr") != selected_pr_num:
+        st.session_state.gh_selected_pr = selected_pr_num
+        st.session_state.pop("gh_pr_files", None)
+    
+    # --- Step 4: Show Changed Files ---
+    st.markdown("---")
+    st.markdown("#### 📄 Changed Files")
+    
+    if "gh_pr_files" not in st.session_state:
+        try:
+            with st.spinner("Fetching changed files..."):
+                st.session_state.gh_pr_files = client.get_pr_files(owner, selected_repo, selected_pr_num)
+        except Exception as e:
+            st.error(f"Failed to fetch PR files: {e}")
+            return
+    
+    pr_files = st.session_state.gh_pr_files
+    if not pr_files:
+        st.info("No files changed in this PR.")
+        return
+    
+    # Show file list with status
+    status_icons = {
+        "added": "🟢 Added",
+        "modified": "🟡 Modified",
+        "removed": "🔴 Removed",
+        "renamed": "🔵 Renamed",
+    }
+    
+    files_df = pd.DataFrame([
+        {
+            "File": f["filename"],
+            "Status": status_icons.get(f["status"], f["status"]),
+            "Changes": f"+{f['additions']} / -{f['deletions']}",
+            "Language": f["language"],
+            "Reviewable": "✅" if f["is_reviewable"] else "⛔",
+        }
+        for f in pr_files
+    ])
+    st.dataframe(files_df, use_container_width=True, hide_index=True)
+    
+    # File selection — only reviewable files
+    reviewable_files = [f for f in pr_files if f["is_reviewable"]]
+    if not reviewable_files:
+        st.warning("No reviewable code files in this PR (only binary or deleted files).")
+        return
+    
+    selected_file = st.selectbox(
+        "Select a file to review",
+        options=[f["filename"] for f in reviewable_files],
+        key="gh_file_select"
+    )
+    
+    # --- Step 5: Run Review ---
+    if st.button("🚀 Run Review", type="primary", key="gh_run_review"):
+        # Get the PR detail to find the head branch
+        selected_pr_info = next((pr for pr in prs if pr["number"] == selected_pr_num), None)
+        head_branch = selected_pr_info["head_branch"] if selected_pr_info else "main"
+        
+        # Get the file metadata
+        file_meta = next((f for f in reviewable_files if f["filename"] == selected_file), None)
+        
+        try:
+            with st.spinner(f"Fetching `{selected_file}` from branch `{head_branch}`..."):
+                file_content = client.get_file_content(owner, selected_repo, selected_file, ref=head_branch)
+            
+            # Set session state for the review engine
+            st.session_state.review_code = file_content
+            st.session_state.review_language = file_meta["language"] if file_meta else "python"
+            st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
+            st.session_state.start_review = True
+            st.session_state.page = "report"
+            st.session_state.gh_review_context = {
+                "repo": f"{owner}/{selected_repo}",
+                "pr": f"PR #{selected_pr_num}",
+                "file": selected_file,
+                "branch": head_branch,
+            }
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to fetch file content: {e}")
 
 def main():
     if "page" not in st.session_state:
@@ -429,6 +644,8 @@ def main():
         st.session_state.review_results = []
     if "review_findings" not in st.session_state:
         st.session_state.review_findings = []
+    if "gh_connected" not in st.session_state:
+        st.session_state.gh_connected = False
 
     render_header()
     
