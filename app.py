@@ -395,6 +395,184 @@ def generate_highlighted_code(code, findings, language='python'):
     
     return "".join(html_rows)
 
+def _render_summary_card(summary_md: str, findings: list):
+    """Render the Review Summary as a styled card above the tabs."""
+    fail_count = sum(1 for f in findings if f.get('status') == 'Fail')
+    warn_count = sum(1 for f in findings if f.get('status') == 'Warning')
+    pass_count = sum(1 for f in findings if f.get('status') == 'Pass')
+
+    if fail_count > 0:
+        badge_color = "#e53e3e"
+        badge_text = f"❌ {fail_count} Critical Issue{'s' if fail_count > 1 else ''}"
+        card_border = "#e53e3e"
+    elif warn_count > 0:
+        badge_color = "#dd6b20"
+        badge_text = f"⚠️ {warn_count} Warning{'s' if warn_count > 1 else ''}"
+        card_border = "#dd6b20"
+    else:
+        badge_color = "#38a169"
+        badge_text = "✅ Looks Good"
+        card_border = "#38a169"
+
+    st.markdown(f"""
+    <style>
+        .summary-card {{
+            border-left: 5px solid {card_border};
+            background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+            border-radius: 8px;
+            padding: 18px 24px 14px 24px;
+            margin-bottom: 18px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.10);
+        }}
+        .summary-header {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+        }}
+        .summary-title {{
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+        }}
+        .summary-badge {{
+            background-color: {badge_color};
+            color: white;
+            border-radius: 20px;
+            padding: 2px 14px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }}
+        .summary-stats {{
+            display: flex;
+            gap: 16px;
+            margin-top: 4px;
+            font-size: 0.82rem;
+            color: #888;
+        }}
+        .stat-chip {{
+            background: rgba(255,255,255,0.07);
+            border-radius: 12px;
+            padding: 2px 10px;
+        }}
+    </style>
+    <div class="summary-card">
+        <div class="summary-header">
+            <span class="summary-title">📋 Review Summary</span>
+            <span class="summary-badge">{badge_text}</span>
+        </div>
+        <div class="summary-stats">
+            <span class="stat-chip">❌ {fail_count} Fail</span>
+            <span class="stat-chip">⚠️ {warn_count} Warning</span>
+            <span class="stat-chip">✅ {pass_count} Pass</span>
+            <span class="stat-chip">🔍 {len(findings)} Total Checks</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(summary_md)
+    st.divider()
+
+
+def _render_recommendations_tab(engine):
+    """Render the AI Recommended Checklist Items tab with checkboxes and add-to-DB support."""
+    findings = st.session_state.get("review_findings", [])
+    code = st.session_state.get("review_code", "")
+    lang = st.session_state.get("review_language", "python")
+
+    if not findings:
+        st.info("Run a review first to see recommendations.")
+        return
+
+    # Load or generate recommendations (cached in session state)
+    if "review_recommendations" not in st.session_state:
+        with st.spinner("🤖 Generating checklist recommendations..."):
+            st.session_state.review_recommendations = engine.get_recommended_checklist_items(findings, code, lang)
+        # Track which items have been added
+        st.session_state.rec_added = set()
+
+    recommendations = st.session_state.get("review_recommendations", [])
+
+    if not recommendations:
+        st.success("✅ No new checklist items recommended — your checklist looks comprehensive!")
+        return
+
+    st.markdown(f"**{len(recommendations)} item{'s' if len(recommendations) > 1 else ''} suggested** — select the ones you'd like to add to your checklist:")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    added_set = st.session_state.get("rec_added", set())
+    selected_indices = []
+
+    for i, item in enumerate(recommendations):
+        already_added = i in added_set
+        col_check, col_content = st.columns([0.5, 9.5])
+        with col_check:
+            # Vertically nudge the checkbox to align with the card
+            st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
+            checked = st.checkbox("", key=f"rec_check_{i}", value=False, disabled=already_added)
+            if checked:
+                selected_indices.append(i)
+        with col_content:
+            category = item.get('category', 'General')
+            description = item.get('description', '')
+            rationale = item.get('rationale', '')
+            added_label = " &nbsp;✅ *Added*" if already_added else ""
+            with st.container(border=True):
+                # Category badge + added indicator on same line
+                st.markdown(
+                    f'<span style="background:rgba(99,179,237,0.18);color:#63b3ed;border-radius:12px;'
+                    f'padding:2px 12px;font-size:0.78rem;font-weight:600;">🏷️ {html.escape(category)}</span>'
+                    f'<span style="font-size:0.82rem;color:#68d391;margin-left:12px;">{added_label}</span>',
+                    unsafe_allow_html=True
+                )
+                st.markdown(f"**{description}**")
+                st.caption(f"💡 {rationale}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Action buttons
+    col_add, col_regen, _ = st.columns([2, 2, 6])
+    with col_add:
+        add_disabled = len(selected_indices) == 0
+        if st.button(
+            f"＋ Add {len(selected_indices)} Selected" if selected_indices else "＋ Add Selected",
+            type="primary",
+            disabled=add_disabled,
+            key="add_rec_btn"
+        ):
+            try:
+                conn = sqlite3.connect("checklist.db")
+                cursor = conn.cursor()
+                added_count = 0
+                for idx in selected_indices:
+                    if idx not in added_set:
+                        item = recommendations[idx]
+                        cursor.execute(
+                            "INSERT INTO checklist (Category, Description) VALUES (?, ?)",
+                            (item.get("category", "General"), item.get("description", ""))
+                        )
+                        added_set.add(idx)
+                        added_count += 1
+                conn.commit()
+                conn.close()
+                st.session_state.rec_added = added_set
+                st.toast(f"✅ {added_count} item{'s' if added_count > 1 else ''} added to checklist!", icon="✅")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to add items: {e}")
+
+    with col_regen:
+        if st.button("🔄 Refresh", key="regen_rec_btn", help="Re-generate recommendations from AI"):
+            st.session_state.pop("review_recommendations", None)
+            st.session_state.pop("rec_added", None)
+            st.rerun()
+
+    # Show completion state
+    if len(added_set) == len(recommendations):
+        st.success("🎉 All recommendations have been added to your checklist!")
+
+
 def render_report_page(engine):
     # Back button
     col1, col2 = st.columns([1, 10])
@@ -402,43 +580,51 @@ def render_report_page(engine):
         if st.button("← Back"):
             st.session_state.page = "input"
             st.session_state.start_review = False
+            # Clear post-review state when going back
+            for key in ["review_summary", "review_recommendations", "rec_added"]:
+                st.session_state.pop(key, None)
             st.rerun()
-    
+
     st.divider()
-    st.subheader("2. Review Report")
-    
-    # Placeholders for streaming content
+    st.subheader("Review Report")
+
+    # Placeholder for streaming status
     status_placeholder = st.empty()
-    
-    tab1, tab2 = st.tabs(["Table View", "Code View"])
-    
+    # Placeholder for the summary card (shown above tabs)
+    summary_placeholder = st.empty()
+
+    # Three tabs: Table View | Code View | Recommended Checklist
+    tab1, tab2, tab3 = st.tabs(["📊 Table View", "💻 Code View", "💡 Recommended Checklist"])
+
     with tab1:
         results_placeholder = st.empty()
-        
+
     with tab2:
         code_view = st.empty()
         code_view.info("Awaiting review completion...")
-    
+
+    # ── NEW REVIEW FLOW ──────────────────────────────────────────────────────
     if st.session_state.get("start_review", False):
-        st.session_state.start_review = False 
-        
+        st.session_state.start_review = False
+        # Clear any stale post-review data from a previous run
+        for key in ["review_summary", "review_recommendations", "rec_added"]:
+            st.session_state.pop(key, None)
+
         st.session_state.review_results = []
         st.session_state.review_findings = []
         status_placeholder.info("Running Analysis...")
-        
+
         code = st.session_state.get("review_code", "")
         lang = st.session_state.get("review_language", "python")
         cat = st.session_state.get("review_category", None)
-        
+
         try:
             for result in engine.analyze_stream(code, filter_category=cat, language=lang):
                 st.session_state.review_findings.append(result)
-                # Format result for display
                 review_comment = result['comment']
                 line_info = f"(Line: {result['line_number']})" if result['line_number'] != "General" else ""
                 full_review = f"{review_comment} {line_info}"
-                
-                # Add icons to status
+
                 status_map = {
                     "Pass": "✅ Pass",
                     "Fail": "❌ Fail",
@@ -447,64 +633,83 @@ def render_report_page(engine):
                     "Info": "ℹ️ Info"
                 }
                 status_with_icon = status_map.get(result["status"], result["status"])
-                
+
                 check_item = {
                     "Checklist Item": result["checklist_item"],
                     "Review": full_review,
                     "Confidence": result["confidence"],
                     "Status": status_with_icon
                 }
-                
                 st.session_state.review_results.append(check_item)
-                
-                # Update DataFrame
+
                 df = pd.DataFrame(st.session_state.review_results)
-                # Force column order
                 df = df[["Checklist Item", "Review", "Confidence", "Status"]]
-                
-                results_placeholder.dataframe(
-                    df, 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-            
-            status_placeholder.success("Review Complete!")
+                results_placeholder.dataframe(df, use_container_width=True, hide_index=True)
+
+            status_placeholder.success("✅ Review Complete!")
+
+            # Render code view
             with tab2:
-                code_view.markdown(generate_highlighted_code(code, st.session_state.review_findings, language=lang), unsafe_allow_html=True)
-            
+                code_view.markdown(
+                    generate_highlighted_code(code, st.session_state.review_findings, language=lang),
+                    unsafe_allow_html=True
+                )
+
+            # Generate & display summary ABOVE the tabs
+            with status_placeholder:
+                pass  # keep "Review Complete!" visible
+            summary_text = engine.get_review_summary(st.session_state.review_findings, code, lang)
+            st.session_state.review_summary = summary_text
+            with summary_placeholder.container():
+                _render_summary_card(summary_text, st.session_state.review_findings)
+
         except Exception as e:
             status_placeholder.error(f"Error during review: {str(e)}")
-            
+
+    # ── REVISIT / RELOAD FLOW ────────────────────────────────────────────────
     else:
-        # Show existing results
         if st.session_state.get("review_results"):
-            
             with tab1:
                 df = pd.DataFrame(st.session_state.review_results)
-                
-                # Ensure order even on reload (if columns exist)
                 cols = ["Checklist Item", "Review", "Confidence", "Status"]
                 if all(col in df.columns for col in cols):
-                        df = df[cols]
-                
-                results_placeholder.dataframe(
-                    df, 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-            
+                    df = df[cols]
+                results_placeholder.dataframe(df, use_container_width=True, hide_index=True)
+
             with tab2:
                 if "review_findings" in st.session_state and "review_code" in st.session_state:
-                     lang_saved = st.session_state.get("review_language", "python")
-                     code_view.markdown(generate_highlighted_code(st.session_state.review_code, st.session_state.review_findings, language=lang_saved), unsafe_allow_html=True)
+                    lang_saved = st.session_state.get("review_language", "python")
+                    code_view.markdown(
+                        generate_highlighted_code(
+                            st.session_state.review_code,
+                            st.session_state.review_findings,
+                            language=lang_saved
+                        ),
+                        unsafe_allow_html=True
+                    )
                 else:
                     code_view.info("Code view not available.")
+
+            # Show summary if already generated
+            if st.session_state.get("review_summary"):
+                with summary_placeholder.container():
+                    _render_summary_card(
+                        st.session_state.review_summary,
+                        st.session_state.get("review_findings", [])
+                    )
         else:
             status_placeholder.info("No active review. Go back and submit code.")
 
+    # ── RECOMMENDATIONS TAB (always rendered, loads lazily) ──────────────────
+    with tab3:
+        if st.session_state.get("review_results"):
+            _render_recommendations_tab(engine)
+        else:
+            st.info("Complete a review to see AI-recommended checklist items.")
+
 
 def render_input_page(engine, focus_cdl):
-    st.subheader("1. Input Code")
+    st.subheader("Input Code")
     
     with st.expander("Manage Checklists", expanded=False):
         try:

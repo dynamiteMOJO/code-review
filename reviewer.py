@@ -96,6 +96,93 @@ class AIReviewer:
                 "line_number": "General"
             }
 
+    def generate_review_summary(self, findings: list, code: str, language: str = "python") -> str:
+        """Generate a crisp, actionable review summary from all findings."""
+        if not self.is_configured:
+            return "_AI Client not configured — summary unavailable._"
+        
+        # Compact findings into a text block for the prompt
+        findings_text = "\n".join([
+            f"- [{f.get('status','?')}] {f.get('checklist_item','')}: {f.get('comment','')} (Line: {f.get('line_number','General')})"
+            for f in findings
+        ])
+        
+        system_prompt = "You are a senior code reviewer. Produce a concise, actionable code review summary."
+        user_prompt = f"""
+        Language: {language}
+        
+        Review findings:
+        {findings_text}
+        
+        Write a structured Markdown summary with exactly these sections:
+        ## Overall Verdict
+        One sentence verdict (e.g. "❌ Code has critical issues that must be fixed before merge.").
+        
+        ## Critical Issues
+        Bullet list of Fail-status items with specific action needed. Be concise.
+        
+        ## Warnings
+        Bullet list of Warning/Unsure items. Be concise. Skip if none.
+        
+        ## Top Action Items
+        Numbered list of the 3–5 most important concrete actions the developer must take.
+        
+        Keep the entire summary under 300 words. Be direct, no fluff.
+        Return only the Markdown text, no code fences.
+        """
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            return self.chat_client.generate(messages).strip()
+        except Exception as e:
+            return f"_Error generating summary: {e}_"
+
+    def recommend_checklist_items(self, findings: list, code: str, language: str, existing_items: list) -> list:
+        """Recommend up to 5 new checklist items not already covered."""
+        if not self.is_configured:
+            return []
+        
+        existing_text = "\n".join([f"- {item}" for item in existing_items])
+        findings_text = "\n".join([
+            f"- [{f.get('status','?')}] {f.get('checklist_item','')}: {f.get('comment','')}"
+            for f in findings
+        ])
+        
+        system_prompt = "You are an expert code quality analyst. Recommend new checklist items based on code review findings."
+        user_prompt = f"""
+        Language: {language}
+        
+        Existing checklist items (do NOT suggest these again):
+        {existing_text}
+        
+        Review findings from this code:
+        {findings_text}
+        
+        Suggest up to 5 NEW, important checklist items that are NOT already covered by the existing list.
+        Focus only on high-value items relevant to {language} data engineering code quality.
+        
+        Return ONLY a JSON array. Each element must have these keys:
+        - "category": Short category name (e.g. "Error Handling", "Performance", "Security")
+        - "description": The checklist item description. Concise, actionable, testable.
+        - "rationale": One sentence explaining why this item is important based on what was seen.
+        
+        If no new items are needed, return an empty array [].
+        Do not include any markdown formatting like ```json.
+        """
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            content = self.chat_client.generate(messages)
+            clean = content.replace("```json", "").replace("```", "").strip()
+            result = json.loads(clean)
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            return []
+
 
 class ReviewEngine:
     def __init__(self, checklist_path: str = "checklist.db", ai_provider: str = "openai", ai_model: str = "gpt-4", sandbox_mode: bool = False):
@@ -177,5 +264,51 @@ class ReviewEngine:
         for _, row in valid_items.iterrows():
             desc = row['Description']
             yield self.ai_reviewer.review_item(code_content, desc, language=language)
+
+    def get_review_summary(self, findings: list, code: str, language: str = "python") -> str:
+        """Return an AI-generated review summary. Returns mock in sandbox mode."""
+        if self.sandbox_mode:
+            fail_count = sum(1 for f in findings if f.get('status') == 'Fail')
+            warn_count = sum(1 for f in findings if f.get('status') == 'Warning')
+            verdict = "❌ Code has critical issues that must be fixed." if fail_count > 0 else "⚠️ Code has warnings that should be addressed."
+            return f"""## Overall Verdict
+{verdict}
+
+## Critical Issues
+{'- No critical issues found.' if fail_count == 0 else chr(10).join([f'- **{f["checklist_item"]}**: {f["comment"]}' for f in findings if f.get('status') == 'Fail'][:5])}
+
+## Warnings
+{'- No warnings.' if warn_count == 0 else chr(10).join([f'- **{f["checklist_item"]}**: {f["comment"]}' for f in findings if f.get('status') == 'Warning'][:3])}
+
+## Top Action Items
+1. Fix all critical issues before merging.
+2. Review all warning-level findings and assess risk.
+3. Ensure error handling is consistent throughout the code.
+"""
+        return self.ai_reviewer.generate_review_summary(findings, code, language)
+
+    def get_recommended_checklist_items(self, findings: list, code: str, language: str = "python") -> list:
+        """Return AI-recommended new checklist items. Returns mock in sandbox mode."""
+        if self.sandbox_mode:
+            return [
+                {
+                    "category": "Error Handling",
+                    "description": "All file I/O operations must be wrapped in try-except blocks with specific exception types.",
+                    "rationale": "Generic bare except clauses were observed which can mask unexpected errors."
+                },
+                {
+                    "category": "Logging",
+                    "description": "Use structured logging with log levels (DEBUG/INFO/WARNING/ERROR) instead of print statements.",
+                    "rationale": "Multiple print() calls were found that won't appear in production log aggregation systems."
+                },
+                {
+                    "category": "Code Documentation",
+                    "description": "All functions with more than 3 parameters must include a docstring explaining purpose, args, and return value.",
+                    "rationale": "Several multi-parameter functions lacked docstrings, reducing maintainability."
+                }
+            ]
+        # Load existing checklist items for de-duplication
+        existing_items = self.checklist['Description'].tolist() if not self.checklist.empty else []
+        return self.ai_reviewer.recommend_checklist_items(findings, code, language, existing_items)
 
 
