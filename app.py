@@ -8,6 +8,7 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters.html import HtmlFormatter
 import re
+import time
 
 import sqlite3
 import re
@@ -505,6 +506,91 @@ def render_report_page(engine):
 def render_input_page(engine, focus_cdl):
     st.subheader("1. Input Code")
     
+    with st.expander("Manage Checklists", expanded=False):
+        try:
+            conn = sqlite3.connect("checklist.db")
+            # Read existing data
+            df_checklist = pd.read_sql_query("SELECT * FROM checklist", conn)
+            
+            # Extract unique categories for dropdown
+            existing_categories = df_checklist["Category"].dropna().unique().tolist()
+            
+            # Initialize a dynamic key for the editor to allow hard resets
+            if "editor_key" not in st.session_state:
+                st.session_state.editor_key = 0
+
+            current_key = f"checklist_editor_{st.session_state.editor_key}"
+
+            # Show interactive data editor
+            st.markdown("Edit the checklist directly below. You can add new rows at the bottom.")
+            st.info("💡 **Tip for Deleting Rows**: Click the empty cell on the far left of a row to select it, then press the **Delete** key on your keyboard.")
+            
+            edited_df = st.data_editor(
+                df_checklist,
+                use_container_width=True,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "id": None, # Hides the ID column securely
+                    "Category": st.column_config.SelectboxColumn(
+                        "Category",
+                        help="Select an existing category, or type to add a new one if permitted by Streamlit",
+                        width="medium",
+                        options=existing_categories,
+                        required=True,
+                    ),
+                    "Description": st.column_config.TextColumn("Description", width="large", required=True)
+                },
+                key=current_key
+            )
+            
+            # Check if there are any pending changes
+            has_changes = False
+            if current_key in st.session_state:
+                editor_state = st.session_state[current_key]
+                if editor_state.get("edited_rows") or editor_state.get("added_rows") or editor_state.get("deleted_rows"):
+                    has_changes = True
+
+            # Layout for buttons (always visible)
+            st.markdown("<br>", unsafe_allow_html=True) # Add a tiny space below table
+            col1, col2, _ = st.columns([1.5, 1.5, 7]) # Tight columns so buttons don't stretch
+            
+            with col1:
+                # Disabled if no changes
+                if st.button("Save Changes", type="primary", disabled=not has_changes):
+                    cursor = conn.cursor()
+                    cursor.execute('DROP TABLE IF EXISTS checklist')
+                    cursor.execute('''
+                        CREATE TABLE checklist (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            Category TEXT,
+                            Description TEXT
+                        )
+                    ''')
+                    
+                    if 'id' in edited_df.columns:
+                        edited_df = edited_df.drop('id', axis=1)
+                    
+                    edited_df.to_sql('checklist', conn, if_exists='append', index=False)
+                    conn.commit()
+                    st.success("✅ Changes saved successfully! Reloading...")
+                    time.sleep(1.5)
+                    
+                    # Force a complete remount of the data editor
+                    st.session_state.editor_key += 1
+                    st.rerun()
+                    
+            with col2:
+                # Disabled if no changes
+                if st.button("Revert", disabled=not has_changes):
+                    # Force a complete remount of the data editor to wipe unsaved UI state
+                    st.session_state.editor_key += 1
+                    st.rerun()
+                
+            conn.close()
+        except Exception as e:
+            st.error(f"Could not load checklist from DB: {e}")
+
     input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File", "GitHub PR"), horizontal=True)
     code_content = ""
     language = "python" # default
