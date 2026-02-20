@@ -6,8 +6,108 @@ import html
 import os
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name, guess_lexer
-from pygments.formatters import HtmlFormatter
+from pygments.formatters.html import HtmlFormatter
 import re
+
+import sqlite3
+import re
+
+# Helper functions for highlighting
+def tokenize_html(html_line):
+    """
+    Tokenizes HTML into (type, value, length) tuples.
+    types: 'tag', 'entity', 'text'
+    """
+    tokens = []
+    # Regex to capture: tags, entities, or generic text
+    # Note: Text might contain < or & if strictly trying to not match bad HTML, 
+    # but we assume valid fragments from Pygments.
+    # Group 1: tag, Group 2: entity, Group 3: text
+    pattern = re.compile(r'(<[^>]+>)|(&[^;]+;)|([^<&]+)')
+    
+    for match in pattern.finditer(html_line):
+        if match.group(1):
+            tokens.append(('tag', match.group(1), 0)) # length 0 for plain text value
+        elif match.group(2):
+            # For entity, we need its decoded length
+            decoded = html.unescape(match.group(2))
+            tokens.append(('entity', match.group(2), len(decoded)))
+        else:
+            text = match.group(3)
+            tokens.append(('text', text, len(text)))
+    return tokens
+
+def inject_highlight(html_line, substring, status_class):
+    """
+    Injects highlight by tokenizing HTML and wrapping content intersect.
+    """
+    try:
+        if not substring:
+            return html_line
+            
+        tokens = tokenize_html(html_line)
+        
+        # Build plain text to find substring
+        plain_text = ""
+        for t_type, t_val, t_len in tokens:
+            if t_type == 'text':
+                plain_text += t_val
+            elif t_type == 'entity':
+                plain_text += html.unescape(t_val)
+                
+        # Find start/end
+        start_idx = plain_text.find(substring)
+        if start_idx == -1:
+            return html_line
+        end_idx = start_idx + len(substring)
+        
+        # Reconstruct
+        new_html = []
+        current_idx = 0
+        
+        for t_type, t_val, t_len in tokens:
+            if t_type == 'tag':
+                new_html.append(t_val)
+                continue
+                
+            # Content or Entity
+            token_end = current_idx + t_len
+            
+            # Check overlap
+            overlap_start = max(current_idx, start_idx)
+            overlap_end = min(token_end, end_idx)
+            
+            if overlap_start < overlap_end:
+                # There is overlap
+                if t_type == 'entity':
+                    # Can't split entity, wrap whole if ANY overlap (simplification)
+                    # Or only if full overlap? Let's wrap whole.
+                    new_html.append(f'<span class="highlight-marker {status_class}">{t_val}</span>')
+                else:
+                    # Text - might need splitting
+                    # Relative indices in the token string make no sense if we use indices based on plain text
+                    # We need rel_start and rel_end inside the token's string
+                    rel_start = overlap_start - current_idx
+                    rel_end = overlap_end - current_idx
+                    
+                    pre = t_val[:rel_start]
+                    mid = t_val[rel_start:rel_end]
+                    post = t_val[rel_end:]
+                    
+                    if pre: new_html.append(pre)
+                    new_html.append(f'<span class="highlight-marker {status_class}">{mid}</span>')
+                    if post: new_html.append(post)
+            else:
+                # No overlap
+                new_html.append(t_val)
+                
+            current_idx += t_len
+            
+        return "".join(new_html)
+        
+    except Exception as e:
+        # print(f"Highlight error: {e}")
+        return html_line
 
 st.set_page_config(page_title="Code Review", layout="wide")
 
@@ -98,10 +198,17 @@ def generate_highlighted_code(code, findings, language='python'):
     # subtle background tints - kept for line background if needed, but we will use them for substring highlighting now
     bg_colors = {
         "Pass": "transparent",
-        "Fail": "rgba(249, 38, 114, 0.4)",    # More opaque for text highlight
-        "Warning": "rgba(253, 151, 31, 0.4)", 
-        "Unsure": "rgba(102, 217, 239, 0.4)", 
-        "Info": "rgba(166, 226, 46, 0.4)"   
+        "Fail": "rgba(249, 38, 114, 0.25)",
+        "Warning": "rgba(253, 151, 31, 0.25)", 
+        "Unsure": "rgba(102, 217, 239, 0.25)", 
+        "Info": "rgba(166, 226, 46, 0.25)"   
+    }
+
+    border_colors = {
+        "Fail": "#f92672",
+        "Warning": "#fd971f",
+        "Unsure": "#66d9ef",
+        "Info": "#a6e22e"
     }
     
     # Map line numbers
@@ -138,9 +245,11 @@ def generate_highlighted_code(code, findings, language='python'):
     # create a list of spans
     code_lines = highlighted_code.splitlines()
 
-    # Re-assemble with line numbers and status indicators
+# Re-assemble with line numbers and status indicators
     html_rows = []
-    
+
+    # Container Style
+
     # Container Style
     html_rows.append('''
 <style>
@@ -157,16 +266,21 @@ def generate_highlighted_code(code, findings, language='python'):
         display: flex;
         width: 100%;
         line-height: 1.5;
+        transition: background-color 0.1s ease;
+    }
+    .code-row:hover {
+        background-color: rgba(255, 255, 255, 0.05);
     }
     .line-num {
-        min-width: 50px;
+        min-width: 45px;
         text-align: right;
-        padding-right: 15px;
-        padding-left: 10px;
-        color: #75715e; /* Monokai comment color */
-        background-color: #272822;
+        padding-right: 12px;
+        padding-left: 8px;
+        color: #85816e; /* Slightly brighter Monokai comment */
+        background-color: #2e2f29; /* Slightly distinct from code area */
         border-right: 1px solid #48483e;
         user-select: none;
+        font-size: 12px;
     }
     .code-content {
         flex-grow: 1;
@@ -183,10 +297,26 @@ def generate_highlighted_code(code, findings, language='python'):
     .status-Pass { border-left: 4px solid transparent; }
     
     .highlight-marker {
-        border-radius: 3px;
-        padding: 0 2px;
-        font-weight: bold;
-        text-shadow: 0 0 5px rgba(0,0,0,0.5);
+        border-radius: 2px;
+        padding: 1px 0;
+        position: relative;
+    }
+    
+    .hl-Fail { 
+        background-color: rgba(249, 38, 114, 0.2);
+        border-bottom: 3.5px wavy #f92672;
+    }
+    .hl-Warning { 
+        background-color: rgba(253, 151, 31, 0.2);
+        border-bottom: 3.5px wavy #fd971f;
+    }
+    .hl-Unsure { 
+        background-color: rgba(102, 217, 239, 0.2);
+        border-bottom: 3.5px dotted #66d9ef;
+    }
+    .hl-Info { 
+        background-color: rgba(166, 226, 46, 0.2);
+        border-bottom: 2.5px dashed #a6e22e;
     }
     
     .tooltip {
@@ -208,59 +338,49 @@ def generate_highlighted_code(code, findings, language='python'):
         
         if i in findings_map:
             line_findings = findings_map[i]
-            statuses = [f['status'] for f in line_findings]
-            
-            # Priority: Fail > Warning > Unsure > Info
-            if "Fail" in statuses:
-                status_class = "status-Fail"
-            elif "Warning" in statuses:
-                status_class = "status-Warning"
-            elif "Unsure" in statuses:
-                status_class = "status-Unsure"
-            elif "Info" in statuses:
-                status_class = "status-Info"
+            statuses = [] # We will collect confirmed statuses
             
             # Tooltip
             tips = []
             for f in line_findings:
-                tips.append(f"[{f['status']}] {f['checklist_item']}:\n{f['comment']}")
+                # Check if this finding actually applies to this line visually
+                should_show = False
                 
                 # Try precise highlighting if substring is available
-                sub = f.get('substring')
-                if sub and len(sub) > 1: # Avoid single chars to reduce noise
-                    try:
-                        # Improved highlighting using regex to handle HTML tags
-                        # 1. Escape the substring for HTML (as it appears in the Pygments output)
-                        escaped_sub_html = html.escape(sub)
-                        
-                        # 2. Build a regex that matches the characters of the substring, 
-                        # allowing for any HTML tags (<div>, <span>, etc.) in between characters.
-                        # This handles cases where Pygments splits tokens (e.g. "sys.exit" -> "sys" "." "exit")
-                        
-                        # Escape each character for regex, then join with pattern for optional tags
-                        # (?:<[^>]*>)* matches 0 or more HTML tags
-                        pattern_str = "(?:<[^>]*>)*".join([re.escape(c) for c in escaped_sub_html])
-                        
-                        # Compile regex ensuring case-sensitive match (usually code is sensitive)
-                        pattern = re.compile(f"({pattern_str})")
-                        
-                        # 3. Create replacement logic
-                        # We wrap the *entire match* (which includes the tags) in our marker span
-                        hl_style = f"background-color: {bg_colors.get(f['status'], 'transparent')};"
-                        
-                        def replacer(match):
-                            return f'<span class="highlight-marker" style="{hl_style}">{match.group(1)}</span>'
-                        
-                        # 4. Perform replacement
-                        # We only replace if valid pattern
-                        line_html = pattern.sub(replacer, line_html)
-                        
-                    except Exception as e:
-                        # Fallback or ignore if regex fails
-                        print(f"Highlight error: {e}")
+                sub = f.get('substring', '').strip()
+                if sub:
+                    # Use deterministic offset mapping
+                    status = f['status']
+                    hl_class = f"hl-{status}"
+                    
+                    # Apply highlight
+                    new_line_html = inject_highlight(line_html, sub, hl_class)
+                    if new_line_html != line_html:
+                        line_html = new_line_html
+                        should_show = True
+                else:
+                    # No substring -> applies to the whole range
+                    should_show = True
+                
+                if should_show:
+                    statuses.append(f['status'])
+                    tips.append(f"[{f['status']}] {f['checklist_item']}:\n{f['comment']}")
 
-            tooltip_text = "\n\n".join(tips)
-            tooltip_attr = f'title="{html.escape(tooltip_text)}"'
+            if statuses:
+                # Priority: Fail > Warning > Unsure > Info
+                if "Fail" in statuses:
+                    status_class = "status-Fail"
+                elif "Warning" in statuses:
+                    status_class = "status-Warning"
+                elif "Unsure" in statuses:
+                    status_class = "status-Unsure"
+                elif "Info" in statuses:
+                    status_class = "status-Info"
+                
+                tooltip_text = "\n\n".join(tips)
+                # Escape HTML and replace newlines with &#10; to keep the attribute valid and multiline in browser
+                escaped_tooltip = html.escape(tooltip_text).replace('\n', '&#10;')
+                tooltip_attr = f'title="{escaped_tooltip}"'
             
         row_html = f'''
 <div class="code-row {status_class}" {tooltip_attr}>
@@ -391,7 +511,24 @@ def render_input_page(engine, focus_cdl):
 
     if input_method == "Paste Code":
         language = st.selectbox("Select Language", ["python", "sql", "hql", "jil"])
-        code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area")
+        
+        # Pre-fill if Sandbox Mode
+        if st.session_state.get("sandbox_mode", False) and not code_content:
+            try:
+                # Try to load the sample file
+                sample_path = "CIN_XML_parsing - input file.py"
+                if os.path.exists(sample_path):
+                    with open(sample_path, "r", encoding='utf-8') as f:
+                        code_content = f.read()
+                    st.info(f"Sandbox Mode: Loaded sample file '{sample_path}'")
+                else:
+                    # Fallback if file not found in CWD, try absolute path if known or just a hardcoded snippet
+                    # For now, let's assume it's in the CWD as per `list_dir`
+                    pass
+            except Exception as e:
+                pass
+        
+        code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area", value=code_content)
     elif input_method == "Upload File":
         uploaded_file = st.file_uploader("Upload .py, .sql, .hql, .jil file", type=["py", "txt", "sql", "hql", "jil"])
         if uploaded_file is not None:
@@ -429,211 +566,215 @@ def render_input_page(engine, focus_cdl):
 
 def render_github_pr_flow(focus_cdl):
     """Multi-step GitHub PR selection and review flow."""
-    
-    st.markdown("---")
-    st.markdown("#### 🔗 Connect to GitHub")
-    
-    # --- Step 1: Connection ---
-    col1, col2 = st.columns(2)
-    with col1:
-        gh_username = st.text_input(
-            "GitHub Username",
-            value=os.getenv("GITHUB_USERNAME", ""),
-            key="gh_username_input"
+    gh_container = st.container()
+    with gh_container:
+        st.markdown("---")
+        st.markdown("#### 🔗 Connect to GitHub")
+        
+        # --- Step 1: Connection ---
+        col1, col2 = st.columns(2)
+        with col1:
+            gh_username = st.text_input(
+                "GitHub Username",
+                value=os.getenv("GITHUB_USERNAME", ""),
+                key="gh_username_input"
+            )
+        with col2:
+            gh_pat = st.text_input(
+                "Personal Access Token (PAT)",
+                value=os.getenv("GITHUB_PAT", ""),
+                type="password",
+                key="gh_pat_input"
+            )
+        
+        if not gh_username or not gh_pat:
+            st.info("Enter your GitHub username and PAT to connect.")
+            return
+        
+        connect_btn = st.button("🔌 Connect", key="gh_connect_btn")
+        
+        if connect_btn:
+            try:
+                client = GitHubClient(token=gh_pat, username=gh_username)
+                user_info = client.validate_connection()
+                st.session_state.gh_client = client
+                st.session_state.gh_owner = gh_username
+                st.session_state.gh_connected = True
+                st.session_state.gh_user_info = user_info
+                # Clear downstream selections on reconnect
+                for key in ["gh_repos", "gh_prs", "gh_pr_files", "gh_selected_repo", "gh_selected_pr"]:
+                    st.session_state.pop(key, None)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Connection failed: {e}")
+                st.session_state.gh_connected = False
+                return
+        
+        if not st.session_state.get("gh_connected", False):
+            return
+        
+        # Show connected status
+        user_info = st.session_state.get("gh_user_info", {})
+        st.success(f"✅ Connected as **{user_info.get('name', gh_username)}** (@{user_info.get('login', gh_username)})")
+        
+        client: GitHubClient = st.session_state.gh_client
+        owner = st.session_state.gh_owner
+        
+        # --- Step 2: Select Repository ---
+        st.markdown("---")
+        st.markdown("#### 📁 Select Repository")
+        
+        # Fetch repos if not cached
+        if "gh_repos" not in st.session_state:
+            try:
+                st.session_state.gh_repos = client.list_repos(owner)
+            except Exception as e:
+                st.error(f"Failed to fetch repos: {e}")
+                return
+        
+        repos = st.session_state.gh_repos
+        if not repos:
+            st.warning("No repositories found for this user.")
+            return
+        
+        repo_names = [r["name"] for r in repos]
+        selected_repo = st.selectbox(
+            "Repository",
+            options=repo_names,
+            key="gh_repo_select",
+            format_func=lambda name: f"{name} ({next((r['language'] for r in repos if r['name'] == name), 'Unknown')})"
         )
-    with col2:
-        gh_pat = st.text_input(
-            "Personal Access Token (PAT)",
-            value=os.getenv("GITHUB_PAT", ""),
-            type="password",
-            key="gh_pat_input"
-        )
-    
-    if not gh_username or not gh_pat:
-        st.info("Enter your GitHub username and PAT to connect.")
-        return
-    
-    connect_btn = st.button("🔌 Connect", key="gh_connect_btn")
-    
-    if connect_btn:
-        try:
-            client = GitHubClient(token=gh_pat, username=gh_username)
-            user_info = client.validate_connection()
-            st.session_state.gh_client = client
-            st.session_state.gh_owner = gh_username
-            st.session_state.gh_connected = True
-            st.session_state.gh_user_info = user_info
-            # Clear downstream selections on reconnect
-            for key in ["gh_repos", "gh_prs", "gh_pr_files", "gh_selected_repo", "gh_selected_pr"]:
+        
+        if not selected_repo:
+            return
+        
+        # Clear PR cache if repo changed
+        if st.session_state.get("gh_selected_repo") != selected_repo:
+            st.session_state.gh_selected_repo = selected_repo
+            for key in ["gh_prs", "gh_pr_files", "gh_selected_pr"]:
                 st.session_state.pop(key, None)
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ Connection failed: {e}")
-            st.session_state.gh_connected = False
-            return
-    
-    if not st.session_state.get("gh_connected", False):
-        return
-    
-    # Show connected status
-    user_info = st.session_state.get("gh_user_info", {})
-    st.success(f"✅ Connected as **{user_info.get('name', gh_username)}** (@{user_info.get('login', gh_username)})")
-    
-    client: GitHubClient = st.session_state.gh_client
-    owner = st.session_state.gh_owner
-    
-    # --- Step 2: Select Repository ---
-    st.markdown("---")
-    st.markdown("#### 📁 Select Repository")
-    
-    # Fetch repos if not cached
-    if "gh_repos" not in st.session_state:
-        try:
-            st.session_state.gh_repos = client.list_repos(owner)
-        except Exception as e:
-            st.error(f"Failed to fetch repos: {e}")
-            return
-    
-    repos = st.session_state.gh_repos
-    if not repos:
-        st.warning("No repositories found for this user.")
-        return
-    
-    repo_names = [r["name"] for r in repos]
-    selected_repo = st.selectbox(
-        "Repository",
-        options=repo_names,
-        key="gh_repo_select",
-        format_func=lambda name: f"{name} ({next((r['language'] for r in repos if r['name'] == name), 'Unknown')})"
-    )
-    
-    if not selected_repo:
-        return
-    
-    # Clear PR cache if repo changed
-    if st.session_state.get("gh_selected_repo") != selected_repo:
-        st.session_state.gh_selected_repo = selected_repo
-        for key in ["gh_prs", "gh_pr_files", "gh_selected_pr"]:
-            st.session_state.pop(key, None)
-    
-    # --- Step 3: Browse Pull Requests ---
-    st.markdown("---")
-    st.markdown("#### 🔀 Open Pull Requests")
-    
-    # Fetch PRs if not cached
-    if "gh_prs" not in st.session_state:
-        try:
-            with st.spinner("Fetching pull requests..."):
-                st.session_state.gh_prs = client.list_pull_requests(owner, selected_repo)
-        except Exception as e:
-            st.error(f"Failed to fetch PRs: {e}")
-            return
-    
-    prs = st.session_state.gh_prs
-    if not prs:
-        st.info("No open pull requests found in this repository.")
-        return
-    
-    # Show PRs in a styled table
-    pr_display = pd.DataFrame([
-        {
-            "#": pr["number"],
-            "Title": pr["title"],
-            "Author": pr["author"],
-            "Date": pr["created_at"],
-            "Branch": f"{pr['head_branch']} → {pr['base_branch']}",
-        }
-        for pr in prs
-    ])
-    st.dataframe(pr_display, use_container_width=True, hide_index=True)
-    
-    # PR selection
-    pr_options = {f"PR #{pr['number']}: {pr['title']}": pr["number"] for pr in prs}
-    selected_pr_label = st.selectbox("Select a PR to review", options=list(pr_options.keys()), key="gh_pr_select")
-    selected_pr_num = pr_options[selected_pr_label]
-    
-    # Clear files cache if PR changed
-    if st.session_state.get("gh_selected_pr") != selected_pr_num:
-        st.session_state.gh_selected_pr = selected_pr_num
-        st.session_state.pop("gh_pr_files", None)
-    
-    # --- Step 4: Show Changed Files ---
-    st.markdown("---")
-    st.markdown("#### 📄 Changed Files")
-    
-    if "gh_pr_files" not in st.session_state:
-        try:
-            with st.spinner("Fetching changed files..."):
-                st.session_state.gh_pr_files = client.get_pr_files(owner, selected_repo, selected_pr_num)
-        except Exception as e:
-            st.error(f"Failed to fetch PR files: {e}")
-            return
-    
-    pr_files = st.session_state.gh_pr_files
-    if not pr_files:
-        st.info("No files changed in this PR.")
-        return
-    
-    # Show file list with status
-    status_icons = {
-        "added": "🟢 Added",
-        "modified": "🟡 Modified",
-        "removed": "🔴 Removed",
-        "renamed": "🔵 Renamed",
-    }
-    
-    files_df = pd.DataFrame([
-        {
-            "File": f["filename"],
-            "Status": status_icons.get(f["status"], f["status"]),
-            "Changes": f"+{f['additions']} / -{f['deletions']}",
-            "Language": f["language"],
-            "Reviewable": "✅" if f["is_reviewable"] else "⛔",
-        }
-        for f in pr_files
-    ])
-    st.dataframe(files_df, use_container_width=True, hide_index=True)
-    
-    # File selection — only reviewable files
-    reviewable_files = [f for f in pr_files if f["is_reviewable"]]
-    if not reviewable_files:
-        st.warning("No reviewable code files in this PR (only binary or deleted files).")
-        return
-    
-    selected_file = st.selectbox(
-        "Select a file to review",
-        options=[f["filename"] for f in reviewable_files],
-        key="gh_file_select"
-    )
-    
-    # --- Step 5: Run Review ---
-    if st.button("🚀 Run Review", type="primary", key="gh_run_review"):
-        # Get the PR detail to find the head branch
-        selected_pr_info = next((pr for pr in prs if pr["number"] == selected_pr_num), None)
-        head_branch = selected_pr_info["head_branch"] if selected_pr_info else "main"
         
-        # Get the file metadata
-        file_meta = next((f for f in reviewable_files if f["filename"] == selected_file), None)
+        # --- Step 3: Browse Pull Requests ---
+        st.markdown("---")
+        st.markdown("#### 🔀 Open Pull Requests")
         
-        try:
-            with st.spinner(f"Fetching `{selected_file}` from branch `{head_branch}`..."):
-                file_content = client.get_file_content(owner, selected_repo, selected_file, ref=head_branch)
-            
-            # Set session state for the review engine
-            st.session_state.review_code = file_content
-            st.session_state.review_language = file_meta["language"] if file_meta else "python"
-            st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
-            st.session_state.start_review = True
-            st.session_state.page = "report"
-            st.session_state.gh_review_context = {
-                "repo": f"{owner}/{selected_repo}",
-                "pr": f"PR #{selected_pr_num}",
-                "file": selected_file,
-                "branch": head_branch,
+        # Fetch PRs if not cached
+        if "gh_prs" not in st.session_state:
+            try:
+                with st.spinner("Fetching pull requests..."):
+                    st.session_state.gh_prs = client.list_pull_requests(owner, selected_repo)
+            except Exception as e:
+                st.error(f"Failed to fetch PRs: {e}")
+                return
+        
+        prs = st.session_state.gh_prs
+        if not prs:
+            st.info("No open pull requests found in this repository.")
+            return
+        
+        # Show PRs in a styled table
+        pr_display = pd.DataFrame([
+            {
+                "#": pr["number"],
+                "Title": pr["title"],
+                "Author": pr["author"],
+                "Date": pr["created_at"],
+                "Branch": f"{pr['head_branch']} → {pr['base_branch']}",
             }
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to fetch file content: {e}")
+            for pr in prs
+        ])
+        st.dataframe(pr_display, use_container_width=True, hide_index=True)
+        
+        # PR selection
+        pr_options = {f"PR #{pr['number']}: {pr['title']}": pr["number"] for pr in prs}
+        selected_pr_label = st.selectbox("Select a PR to review", options=list(pr_options.keys()), key="gh_pr_select")
+        selected_pr_num = pr_options[selected_pr_label]
+        
+        # Clear files cache if PR changed
+        if st.session_state.get("gh_selected_pr") != selected_pr_num:
+            st.session_state.gh_selected_pr = selected_pr_num
+            st.session_state.pop("gh_pr_files", None)
+        
+        # --- Step 4: Show Changed Files ---
+        st.markdown("---")
+        st.markdown("#### 📄 Changed Files")
+        
+        if "gh_pr_files" not in st.session_state:
+            try:
+                with st.spinner("Fetching changed files..."):
+                    st.session_state.gh_pr_files = client.get_pr_files(owner, selected_repo, selected_pr_num)
+            except Exception as e:
+                st.error(f"Failed to fetch PR files: {e}")
+                return
+        
+        pr_files = st.session_state.gh_pr_files
+        if not pr_files:
+            st.info("No files changed in this PR.")
+            return
+        
+        # Show file list with status
+        status_icons = {
+            "added": "🟢 Added",
+            "modified": "🟡 Modified",
+            "removed": "🔴 Removed",
+            "renamed": "🔵 Renamed",
+        }
+        
+        files_df = pd.DataFrame([
+            {
+                "File": f["filename"],
+                "Status": status_icons.get(f["status"], f["status"]),
+                "Changes": f"+{f['additions']} / -{f['deletions']}",
+                "Language": f["language"],
+                "Reviewable": "✅" if f["is_reviewable"] else "⛔",
+            }
+            for f in pr_files
+        ])
+        st.dataframe(files_df, use_container_width=True, hide_index=True)
+        
+        # File selection — only reviewable files
+        reviewable_files = [f for f in pr_files if f["is_reviewable"]]
+        if not reviewable_files:
+            st.warning("No reviewable code files in this PR (only binary or deleted files).")
+            return
+        
+        selected_file = st.selectbox(
+            "Select a file to review",
+            options=[f["filename"] for f in reviewable_files],
+            key="gh_file_select"
+        )
+        
+        # --- Step 5: Run Review ---
+        if st.button("🚀 Run Review", type="primary", key="gh_run_review"):
+            # Get the PR detail to find the head branch
+            selected_pr_info = next((pr for pr in prs if pr["number"] == selected_pr_num), None)
+            head_branch = selected_pr_info["head_branch"] if selected_pr_info else "main"
+            
+            # Get the file metadata
+            file_meta = next((f for f in reviewable_files if f["filename"] == selected_file), None)
+            
+            file_content = None
+            try:
+                with st.spinner(f"Fetching `{selected_file}` from branch `{head_branch}`..."):
+                    file_content = client.get_file_content(owner, selected_repo, selected_file, ref=head_branch)
+            except Exception as e:
+                st.error(f"Failed to fetch file content: {e}")
+                
+            if file_content:
+                # Set session state for the review engine
+                st.session_state.review_code = file_content
+                st.session_state.review_language = file_meta["language"] if file_meta else "python"
+                st.session_state.review_category = "Code CDL Standards" if focus_cdl else None
+                st.session_state.start_review = True
+                st.session_state.page = "report"
+                st.session_state.gh_review_context = {
+                    "repo": f"{owner}/{selected_repo}",
+                    "pr": f"PR #{selected_pr_num}",
+                    "file": selected_file,
+                    "branch": head_branch,
+                }
+                # Rerun immediately to clear the input page and show the report page
+                st.rerun()
 
 def main():
     if "page" not in st.session_state:
@@ -667,16 +808,17 @@ def main():
         focus_cdl = st.checkbox("Focus on 'Code CDL Standards'", value=True)
         
         st.divider()
-        st.info("Checklist loaded from `checklist.csv`")
-        if st.checkbox("View Raw Checklist"):
-            try:
-                st.dataframe(pd.read_csv("checklist.csv"))
-            except:
-                st.error("checklist.csv not found")
+        st.subheader("Sandbox")
+        sandbox_mode = st.checkbox("Sandbox Mode (Offline Demo)", value=False, help="Use mock data to test the UI without LLM keys.")
+        if sandbox_mode:
+            st.session_state.sandbox_mode = True
+        else:
+            st.session_state.sandbox_mode = False
 
     # Initialize Engine (No API Key needed from UI)
-    engine = ReviewEngine("checklist.csv", ai_provider=ai_provider, ai_model=model_name)
+    engine = ReviewEngine("checklist.db", ai_provider=ai_provider, ai_model=model_name, sandbox_mode=sandbox_mode)
 
+    # Main content area with clear page separation
     if st.session_state.page == "input":
         render_input_page(engine, focus_cdl)
     elif st.session_state.page == "report":

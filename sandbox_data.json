@@ -1,0 +1,130 @@
+[
+    {
+        "checklist_item": "Any parameters having hardcoded values?",
+        "confidence": "100%",
+        "comment": "Hardcoded full S3 path detected. This should be parameterized or derived from configuration.",
+        "status": "Fail",
+        "line_number": "23",
+        "substring": "s3://us-e1-odp-rs-dev-datalake/inbound/test/20201119155306_DispositionAssigned-0300239550049-W04696-20201119-074928-578.xml"
+    },
+    {
+        "checklist_item": "Any parameters having hardcoded values?",
+        "confidence": "98%",
+        "comment": "Hardcoded filename should be provided as an argument or configuration parameter.",
+        "status": "Fail",
+        "line_number": "168",
+        "substring": "20201119155306_DispositionAssigned-0300239550049-W04696-20201119-074928-578.xml"
+    },
+    {
+        "checklist_item": "Python code: The try catch block should be present while handle business logic",
+        "confidence": "95%",
+        "comment": "The function `parse_xml_body` lacks error handling for XML parsing and tag searching, which can lead to runtime crashes.",
+        "status": "Fail",
+        "line_number": "30-115",
+        "substring": "def parse_xml_body(rdd):"
+    },
+    {
+        "checklist_item": "Python code: The try catch block should be present while handle business logic",
+        "confidence": "95%",
+        "comment": "The function `parse_xml_header` lacks error handling.",
+        "status": "Fail",
+        "line_number": "137-149",
+        "substring": "def parse_xml_header(rdd):"
+    },
+    {
+        "checklist_item": "The exit(1) should be incorporate in the exception block",
+        "confidence": "90%",
+        "comment": "Since try-except blocks are missing, graceful exit with status code 1 is also missing.",
+        "status": "Fail",
+        "line_number": "General",
+        "substring": ""
+    },
+    {
+        "checklist_item": "When using Array data type, array bounds are checked? This is to prevent IndexError or ArrayIndexOutOfBounds exception.",
+        "confidence": "85%",
+        "comment": "Direct indexing into `eventlist[1]` without checking list length could cause an `IndexError` if the XML structure varies.",
+        "status": "Fail",
+        "line_number": "111",
+        "substring": "eventlist[1]"
+    },
+    {
+        "checklist_item": "Python packages - approved from Abbvie Architecture?",
+        "confidence": "100%",
+        "comment": "Using `os.system` for AWS CLI commands is against standards. Use `boto3` for programmatic S3 interactions.",
+        "status": "Fail",
+        "line_number": "188",
+        "substring": "os.system(\"aws s3 sync"
+    },
+    {
+        "checklist_item": "Python packages - approved from Abbvie Architecture?",
+        "confidence": "100%",
+        "comment": "Using `os.system` for `rm` is unsafe. Use `boto3` or `os.remove` if local.",
+        "status": "Fail",
+        "line_number": "189",
+        "substring": "os.system(\"aws s3 rm"
+    },
+    {
+        "checklist_item": "Is the code has logger functionality, avoiding print statements, commenting the code.",
+        "confidence": "95%",
+        "comment": "Application does not implement standard logging. It is recommended to use the `logging` module instead of relying on default output.",
+        "status": "Fail",
+        "line_number": "General",
+        "substring": ""
+    },
+    {
+        "checklist_item": "Is the code using toPandas api on a huge dataset? This will impact performance and prone to fail when data grows. Suggest not to use toPandas.",
+        "confidence": "92%",
+        "comment": "`collect()` is used to retrieve GLN value. Ensure the source dataframe `final_df_1` is indeed a single-row result as expected to avoid driver memory issues.",
+        "status": "Warning",
+        "line_number": "173",
+        "substring": "collect()[0]"
+    },
+    {
+        "checklist_item": "All tablenames/DB/columns are properly parametrized?",
+        "confidence": "90%",
+        "comment": "Column names are hardcoded in definition list `COL_NAMES_BODY`. Consider moving to a config file.",
+        "status": "Info",
+        "line_number": "26",
+        "substring": "['ns1:ItemCode', 'ns1:InternalMaterialCode', 'ns1:LotNumber', 'ns1:ExpirationDate', 'ns1:EventDateTime', 'ns0:CommissionEvent']"
+    },
+    {
+        "checklist_item": "Any redundant code that can be replaced by existing functions?",
+        "confidence": "100%",
+        "comment": "Redundant column renaming: `expiration_date` is renamed to itself. Line 180 has several such instances.",
+        "status": "Warning",
+        "line_number": "180",
+        "substring": ".withColumnRenamed(\"expiration_date\",\"expiration_date\")"
+    },
+    {
+        "checklist_item": "All temp data/tables getting cleanedup before exiting the process?",
+        "confidence": "95%",
+        "comment": "Code attempts to remove temporary S3 directory after the sync operation.",
+        "status": "Pass",
+        "line_number": "189",
+        "substring": "aws s3 rm s3://us-e1-odp-rs-dev-datalake/inbound/test/CIN_tracelink_metadata"
+    },
+    {
+        "checklist_item": "Any usage of plain text password? If so replace with aws secret. Is snyk passed?",
+        "confidence": "100%",
+        "comment": "No hardcoded credentials or passwords found in the script.",
+        "status": "Pass",
+        "line_number": "General",
+        "substring": ""
+    },
+    {
+        "checklist_item": "Code CDL Standards",
+        "confidence": "80%",
+        "comment": "Multiple wildcard imports (`from pyspark.sql.functions import *`) are used. This can cause namespace collisions.",
+        "status": "Warning",
+        "line_number": "4",
+        "substring": "from pyspark.sql.functions import *"
+    },
+    {
+        "checklist_item": "No. of the part files in all the tables should be optimized and not having many small part files. Ideal 128MB or 256MB.",
+        "confidence": "90%",
+        "comment": "`coalesce(1)` is used before writing, which optimizes file count to 1. Ensure this is performant for expected data volume.",
+        "status": "Pass",
+        "line_number": "184",
+        "substring": "df_tostore_s3.coalesce(1)"
+    }
+]
