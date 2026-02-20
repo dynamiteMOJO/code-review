@@ -591,30 +591,18 @@ def render_input_page(engine, focus_cdl):
         except Exception as e:
             st.error(f"Could not load checklist from DB: {e}")
 
-    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File", "GitHub PR"), horizontal=True)
+    input_method = st.radio("Select Input Method:", ("Paste Code", "Upload File", "GitHub PR"), horizontal=True, key="input_method_radio")
     code_content = ""
     language = "python" # default
 
     if input_method == "Paste Code":
         language = st.selectbox("Select Language", ["python", "sql", "hql", "jil"])
         
-        # Pre-fill if Sandbox Mode
-        if st.session_state.get("sandbox_mode", False) and not code_content:
-            try:
-                # Try to load the sample file
-                sample_path = "CIN_XML_parsing - input file.py"
-                if os.path.exists(sample_path):
-                    with open(sample_path, "r", encoding='utf-8') as f:
-                        code_content = f.read()
-                    st.info(f"Sandbox Mode: Loaded sample file '{sample_path}'")
-                else:
-                    # Fallback if file not found in CWD, try absolute path if known or just a hardcoded snippet
-                    # For now, let's assume it's in the CWD as per `list_dir`
-                    pass
-            except Exception as e:
-                pass
+        # Show info if in Sandbox Mode
+        if st.session_state.get("sandbox_mode", False):
+            st.info("Sandbox Mode: Loaded sample file 'CIN_XML_parsing - input file.py'")
         
-        code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area", value=code_content)
+        code_content = st.text_area(f"Paste your {language} code here:", height=300, key="input_code_area")
     elif input_method == "Upload File":
         uploaded_file = st.file_uploader("Upload .py, .sql, .hql, .jil file", type=["py", "txt", "sql", "hql", "jil"])
         if uploaded_file is not None:
@@ -895,11 +883,27 @@ def main():
         
         st.divider()
         st.subheader("Sandbox")
-        sandbox_mode = st.checkbox("Sandbox Mode (Offline Demo)", value=False, help="Use mock data to test the UI without LLM keys.")
-        if sandbox_mode:
-            st.session_state.sandbox_mode = True
-        else:
-            st.session_state.sandbox_mode = False
+        
+        def on_sandbox_toggle():
+            if st.session_state.sandbox_cb:
+                st.session_state.sandbox_mode = True
+                st.session_state.input_method_radio = "Paste Code"
+                try:
+                    sample_path = "CIN_XML_parsing - input file.py"
+                    if os.path.exists(sample_path):
+                        with open(sample_path, "r", encoding='utf-8') as f:
+                            st.session_state.input_code_area = f.read()
+                except Exception:
+                    pass
+            else:
+                st.session_state.sandbox_mode = False
+                st.session_state.input_code_area = ""
+                
+        if "sandbox_cb" not in st.session_state:
+            st.session_state.sandbox_cb = st.session_state.get("sandbox_mode", False)
+            
+        st.checkbox("Sandbox Mode (Offline Demo)", key="sandbox_cb", on_change=on_sandbox_toggle, help="Use mock data to test the UI without LLM keys.")
+        sandbox_mode = st.session_state.get("sandbox_cb", False)
 
     # Initialize Engine (No API Key needed from UI)
     engine = ReviewEngine("checklist.db", ai_provider=ai_provider, ai_model=model_name, sandbox_mode=sandbox_mode)
